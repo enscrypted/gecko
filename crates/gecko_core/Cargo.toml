@@ -1,0 +1,30 @@
+[package]
+name = "gecko_core"
+description = "Gecko Audio Engine - Core audio processing and transport"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gecko_dsp = { path = "../gecko_dsp" }
+gecko_platform = { path = "../gecko_platform", features = ["pipewire"] }
+
+cpal.workspace = true
+rtrb.workspace = true
+crossbeam-channel.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+directories = "5.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+criterion.workspace = true
+serde_json.workspace = true
+
+[[bench]]
+name = "engine_benchmark"
+harness = false

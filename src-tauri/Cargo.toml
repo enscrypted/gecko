@@ -1,0 +1,33 @@
+[package]
+name = "gecko_ui"
+description = "Gecko Audio Application - Tauri Frontend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "gecko_ui_lib"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+gecko_core = { path = "../crates/gecko_core" }
+gecko_dsp = { path = "../crates/gecko_dsp" }
+gecko_platform = { path = "../crates/gecko_platform", features = ["pipewire"] }
+
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-autostart = "2"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

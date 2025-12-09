@@ -1,0 +1,40 @@
+[package]
+name = "gecko_platform"
+description = "Platform-specific audio routing for Gecko (PipeWire, WASAPI, CoreAudio)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+crossbeam-channel.workspace = true
+rtrb.workspace = true
+parking_lot = "0.12"
+
+# DSP processing for audio callbacks
+gecko_dsp = { path = "../gecko_dsp" }
+
+# Linux: PipeWire bindings (only compiled on Linux)
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { workspace = true, optional = true }
+# libspa-sys for PipeWire SPA types
+# libspa = "0.8"
+
+# Windows: Win32 API bindings
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, optional = true }
+
+# macOS: CoreAudio bindings (using system frameworks)
+[target.'cfg(target_os = "macos")'.dependencies]
+# coreaudio-rs = { version = "0.11", optional = true }
+
+[features]
+default = []
+pipewire = ["dep:pipewire"]
+wasapi = ["dep:windows"]
+# coreaudio = ["dep:coreaudio-rs"]

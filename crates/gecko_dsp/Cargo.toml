@@ -1,0 +1,23 @@
+[package]
+name = "gecko_dsp"
+description = "Digital Signal Processing for Gecko Audio - 10-band parametric EQ"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+biquad.workspace = true
+thiserror.workspace = true
+# FFT for spectrum analysis visualization
+rustfft = "6.2"
+# Thread-safe locks for spectrum analyzer state
+parking_lot = "0.12"
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "eq_benchmark"
+harness = false

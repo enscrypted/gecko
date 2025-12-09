@@ -1,0 +1,237 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Theme color definitions using CSS custom properties */
+:root {
+  /* Default: Dark theme */
+  --gecko-bg-primary: #0a0a0a;
+  --gecko-bg-secondary: #141414;
+  --gecko-bg-tertiary: #1f1f1f;
+  --gecko-bg-elevated: #262626;
+  --gecko-text-primary: #fafafa;
+  --gecko-text-secondary: #a3a3a3;
+  --gecko-text-muted: #737373;
+  --gecko-accent: #4ade80;
+  --gecko-accent-hover: #22c55e;
+  --gecko-accent-muted: #166534;
+  --gecko-danger: #ef4444;
+  --gecko-danger-hover: #dc2626;
+  --gecko-warning: #f59e0b;
+  --gecko-warning-hover: #d97706;
+  /* Border colors darker to avoid subpixel rendering artifacts */
+  --gecko-border: #1a1a1a;
+  --gecko-border-hover: #333333;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --gecko-bg-primary: #fafafa;
+  --gecko-bg-secondary: #f5f5f5;
+  --gecko-bg-tertiary: #e5e5e5;
+  --gecko-bg-elevated: #d4d4d4;
+  --gecko-text-primary: #0a0a0a;
+  --gecko-text-secondary: #525252;
+  --gecko-text-muted: #737373;
+  --gecko-accent: #16a34a;
+  --gecko-accent-hover: #15803d;
+  --gecko-accent-muted: #bbf7d0;
+  --gecko-danger: #dc2626;
+  --gecko-danger-hover: #b91c1c;
+  --gecko-warning: #d97706;
+  --gecko-warning-hover: #b45309;
+  --gecko-border: #d4d4d4;
+  --gecko-border-hover: #a3a3a3;
+}
+
+/* Midnight theme - deeper blues, easier on eyes for night use */
+[data-theme="midnight"] {
+  --gecko-bg-primary: #0f0f1a;
+  --gecko-bg-secondary: #16162a;
+  --gecko-bg-tertiary: #1e1e3a;
+  --gecko-bg-elevated: #2a2a4a;
+  --gecko-text-primary: #e8e8ff;
+  --gecko-text-secondary: #9898c0;
+  --gecko-text-muted: #6868a0;
+  --gecko-accent: #818cf8;
+  --gecko-accent-hover: #6366f1;
+  --gecko-accent-muted: #3730a3;
+  --gecko-danger: #f87171;
+  --gecko-danger-hover: #ef4444;
+  --gecko-warning: #fbbf24;
+  --gecko-warning-hover: #f59e0b;
+  --gecko-border: #2a2a4a;
+  --gecko-border-hover: #3a3a6a;
+}
+
+/* Nord theme - inspired by Arctic, soft muted colors */
+[data-theme="nord"] {
+  --gecko-bg-primary: #2e3440;
+  --gecko-bg-secondary: #3b4252;
+  --gecko-bg-tertiary: #434c5e;
+  --gecko-bg-elevated: #4c566a;
+  --gecko-text-primary: #eceff4;
+  --gecko-text-secondary: #d8dee9;
+  --gecko-text-muted: #a0a8b8;
+  --gecko-accent: #88c0d0;
+  --gecko-accent-hover: #8fbcbb;
+  --gecko-accent-muted: #5e81ac;
+  --gecko-danger: #bf616a;
+  --gecko-danger-hover: #a54e56;
+  --gecko-warning: #ebcb8b;
+  --gecko-warning-hover: #d9b76e;
+  --gecko-border: #4c566a;
+  --gecko-border-hover: #5a6578;
+}
+
+/* High Contrast - WCAG AAA compliant, maximum readability */
+[data-theme="high-contrast"] {
+  --gecko-bg-primary: #000000;
+  --gecko-bg-secondary: #0d0d0d;
+  --gecko-bg-tertiary: #1a1a1a;
+  --gecko-bg-elevated: #262626;
+  --gecko-text-primary: #ffffff;
+  --gecko-text-secondary: #e0e0e0;
+  --gecko-text-muted: #b0b0b0;
+  --gecko-accent: #00ff88;
+  --gecko-accent-hover: #00dd77;
+  --gecko-accent-muted: #005533;
+  --gecko-danger: #ff4444;
+  --gecko-danger-hover: #ff2222;
+  --gecko-warning: #ffcc00;
+  --gecko-warning-hover: #ddaa00;
+  --gecko-border: #444444;
+  --gecko-border-hover: #666666;
+}
+
+/* Deuteranopia-safe - optimized for red-green color blindness (most common) */
+[data-theme="colorblind"] {
+  --gecko-bg-primary: #0a0a0a;
+  --gecko-bg-secondary: #141414;
+  --gecko-bg-tertiary: #1f1f1f;
+  --gecko-bg-elevated: #262626;
+  --gecko-text-primary: #fafafa;
+  --gecko-text-secondary: #a3a3a3;
+  --gecko-text-muted: #737373;
+  /* Blue instead of green for primary accent (distinguishable from red) */
+  --gecko-accent: #3b82f6;
+  --gecko-accent-hover: #2563eb;
+  --gecko-accent-muted: #1e3a5f;
+  /* Orange instead of red for danger (more visible) */
+  --gecko-danger: #f97316;
+  --gecko-danger-hover: #ea580c;
+  /* Yellow remains visible */
+  --gecko-warning: #fbbf24;
+  --gecko-warning-hover: #f59e0b;
+  /* Border colors darker to avoid subpixel rendering artifacts */
+  --gecko-border: #1a1a1a;
+  --gecko-border-hover: #333333;
+}
+
+/* Solarized Dark - popular low-contrast theme, reduces eye strain */
+[data-theme="solarized"] {
+  --gecko-bg-primary: #002b36;
+  --gecko-bg-secondary: #073642;
+  --gecko-bg-tertiary: #0a4050;
+  --gecko-bg-elevated: #0d4a5c;
+  --gecko-text-primary: #fdf6e3;
+  --gecko-text-secondary: #93a1a1;
+  --gecko-text-muted: #657b83;
+  --gecko-accent: #2aa198;
+  --gecko-accent-hover: #268bd2;
+  --gecko-accent-muted: #1a6660;
+  --gecko-danger: #dc322f;
+  --gecko-danger-hover: #cb4b16;
+  --gecko-warning: #b58900;
+  --gecko-warning-hover: #a37800;
+  --gecko-border: #0a4050;
+  --gecko-border-hover: #1a5565;
+}
+
+/* Base layer customizations */
+@layer base {
+  body {
+    @apply bg-gecko-bg-primary text-gecko-text-primary;
+    @apply antialiased;
+    font-feature-settings: "kern" 1, "liga" 1;
+    /* Smooth theme transitions */
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  /* Set default ring-offset color to match background (prevents white lines) */
+  * {
+    --tw-ring-offset-color: var(--gecko-bg-primary);
+  }
+
+  /* Remove default focus outlines, we use custom focus styles */
+  *:focus {
+    outline: none;
+  }
+
+  /* Custom focus-visible styles for accessibility */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-gecko-accent ring-offset-1 ring-offset-gecko-bg-primary;
+  }
+
+  /* Remove focus ring from range inputs (they have thumb styling) */
+  input[type="range"]:focus-visible {
+    @apply ring-0 ring-offset-0;
+  }
+
+  /* Prevent text selection on interactive elements */
+  button,
+  [role="button"] {
+    @apply select-none;
+  }
+
+  /* Scrollbar styling for dark theme */
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-gecko-bg-secondary;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gecko-border rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gecko-border-hover;
+  }
+}
+
+/* Component layer for reusable patterns */
+@layer components {
+  /* Vertical slider container - needed for EQ bands */
+  .slider-vertical-container {
+    @apply flex flex-col items-center gap-2;
+  }
+
+  /* Level meter bar animation - minimal CSS transition since JS handles smoothing */
+  .meter-bar-fill {
+    @apply transition-[width,background-color] duration-[16ms] ease-linear;
+  }
+
+  /* Focus ring utility for custom focus states */
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2;
+    @apply focus-visible:ring-gecko-accent focus-visible:ring-offset-2;
+    @apply focus-visible:ring-offset-gecko-bg-primary;
+  }
+}
+
+/* Utility layer for one-off utilities */
+@layer utilities {
+  /* Text gradient utility */
+  .text-gradient {
+    @apply bg-gradient-to-r from-gecko-accent to-emerald-400;
+    @apply bg-clip-text text-transparent;
+  }
+
+  /* Glassmorphism effect */
+  .glass {
+    @apply bg-gecko-bg-secondary/80 backdrop-blur-sm;
+  }
+}

@@ -1,0 +1,73 @@
+[workspace]
+# Gecko Audio Application - Cargo Workspace
+# A cross-platform audio routing and processing application
+resolver = "2"
+
+members = [
+    "crates/gecko_core",
+    "crates/gecko_dsp",
+    "crates/gecko_platform",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Ken Mills"]
+license = "MIT"
+rust-version = "1.70"
+
+[workspace.dependencies]
+# Audio I/O - Cross-platform audio transport layer
+cpal = "0.16"
+
+# DSP - BiQuad filters for EQ (no_std compatible, zero-allocation)
+biquad = "0.4"
+
+# Lock-free data structures for real-time audio
+rtrb = "0.3"                    # SPSC ring buffer for audio thread communication
+crossbeam-channel = "0.5"       # MPMC channels for control messages
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async runtime (for Tauri)
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+
+# Platform-specific (conditionally compiled)
+[workspace.dependencies.pipewire]
+version = "0.8"
+
+[workspace.dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+]
+
+# Testing
+[workspace.dependencies.criterion]
+version = "0.5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1  # Slight optimization for audio code even in dev
+
+[profile.test]
+opt-level = 2  # Better optimization for benchmarks in tests
