@@ -38,7 +38,7 @@ Gecko intercepts audio from specific applications, processes it through a 10-ban
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/gecko.git
+git clone https://github.com/enscrypted/gecko.git
 cd gecko
 
 # Install frontend dependencies
@@ -124,7 +124,7 @@ Contributions are welcome! Please read the architecture docs in `docs/` and foll
 
 ## License
 
-[License TBD]
+GPL-3.0 - See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
