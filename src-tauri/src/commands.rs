@@ -6,6 +6,88 @@ use gecko_dsp::PRESETS;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
 
+/// Known untappable apps on macOS due to Apple sandboxing/hardened runtime
+///
+/// These apps cannot be captured via Process Tap API because:
+/// - Safari: WebKit sandbox prevents audio capture
+/// - System apps: Hardened runtime with audio recording restrictions
+/// - Some App Store apps: Hardened runtime
+///
+/// This list is checked by bundle ID prefix or app name.
+#[cfg(target_os = "macos")]
+#[allow(dead_code)] // Reserved for future bundle ID checking
+const UNTAPPABLE_BUNDLE_PREFIXES: &[&str] = &[
+    "com.apple.Safari",
+    "com.apple.finder",
+    "com.apple.systempreferences",
+    "com.apple.Preferences",
+    "com.apple.Terminal",
+    "com.apple.Preview",
+    "com.apple.TextEdit",
+    "com.apple.mail",
+    "com.apple.Notes",
+    "com.apple.reminders",
+    "com.apple.iCal",
+    "com.apple.AddressBook",
+    "com.apple.FaceTime",
+    "com.apple.iChat",
+    "com.apple.Photos",
+    "com.apple.Music",
+    "com.apple.TV",
+    "com.apple.Podcasts",
+    "com.apple.Books",
+    "com.apple.News",
+    "com.apple.Stocks",
+    "com.apple.Home",
+    "com.apple.weather",
+];
+
+/// Known untappable app names (fallback when bundle ID not available)
+#[cfg(target_os = "macos")]
+const UNTAPPABLE_APP_NAMES: &[&str] = &[
+    "Safari",
+    "Finder",
+    "System Preferences",
+    "System Settings",
+    "Terminal",
+    "Preview",
+    "TextEdit",
+    "Mail",
+    "Notes",
+    "Reminders",
+    "Calendar",
+    "Contacts",
+    "FaceTime",
+    "Messages",
+    "Photos",
+    "Music",
+    "TV",
+    "Podcasts",
+    "Books",
+    "News",
+    "Stocks",
+    "Home",
+    "Weather",
+];
+
+/// Check if an app can be tapped via Process Tap API (macOS only)
+///
+/// Returns (is_tappable, untappable_reason)
+#[cfg(target_os = "macos")]
+fn check_app_tappability(app_name: &str, _pid: u32) -> (bool, Option<String>) {
+    // Check against known untappable app names
+    for &name in UNTAPPABLE_APP_NAMES {
+        if app_name.eq_ignore_ascii_case(name) {
+            return (false, Some("macOS security prevents per-app capture. Only Master EQ affects this app.".to_string()));
+        }
+    }
+
+    // TODO: Could also check bundle ID via NSRunningApplication
+    // For now, name-based detection is sufficient
+
+    (true, None)
+}
+
 /// Initialize the audio engine
 #[tauri::command]
 pub fn init_engine(state: State<AppState>) -> Result<(), String> {
@@ -119,7 +201,11 @@ pub fn set_band_gain(state: State<AppState>, band: usize, gain_db: f32) -> Resul
     }
 }
 
-/// Set per-stream EQ band offset (additive to master EQ)
+/// Set per-app EQ band gain (TRUE per-app EQ, applied BEFORE mixing)
+///
+/// This is TRUE per-app EQ - each app has its own independent Equalizer instance.
+/// Audio flow: App Audio → Per-App EQ → Mix → Master EQ → Output
+///
 /// stream_id format is "name:pid" - we persist by name for stability
 #[tauri::command]
 pub fn set_stream_band_gain(state: State<AppState>, stream_id: String, band: usize, gain_db: f32) -> Result<(), String> {
@@ -127,10 +213,19 @@ pub fn set_stream_band_gain(state: State<AppState>, stream_id: String, band: usi
 
     if let Some(ref engine) = *engine_guard {
         engine.set_stream_band_gain(stream_id.clone(), band, gain_db).map_err(|e| e.to_string())?;
-        
-        // Extract app name from stream_id (format: "name:pid")
-        // Persist by app name so settings survive across sessions
+
+        // Extract app name from stream_id for settings persistence
+        // Format varies by platform:
+        //   - Linux: "PID:Name" (name is after colon)
+        //   - macOS: "Name:PID" (name is before colon)
+        #[cfg(target_os = "linux")]
+        let app_name = stream_id.split(':').nth(1).unwrap_or(&stream_id).to_string();
+
+        #[cfg(target_os = "macos")]
         let app_name = stream_id.split(':').next().unwrap_or(&stream_id).to_string();
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let app_name = stream_id.clone();
         
         // Persist to settings
         if let Ok(mut settings) = state.settings.lock() {
@@ -189,9 +284,18 @@ pub fn set_stream_volume(state: State<AppState>, stream_id: String, volume: f32)
     if let Some(ref engine) = *engine_guard {
         engine.set_stream_volume(stream_id.clone(), volume).map_err(|e| e.to_string())?;
 
-        // Extract app name from stream_id (format: "name:pid")
-        // Persist by app name so settings survive across sessions
+        // Extract app name from stream_id for settings persistence
+        // Format varies by platform:
+        //   - Linux: "PID:Name" (name is after colon)
+        //   - macOS: "Name:PID" (name is before colon)
+        #[cfg(target_os = "linux")]
+        let app_name = stream_id.split(':').nth(1).unwrap_or(&stream_id).to_string();
+
+        #[cfg(target_os = "macos")]
         let app_name = stream_id.split(':').next().unwrap_or(&stream_id).to_string();
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let app_name = stream_id.clone();
 
         // Persist to settings
         if let Ok(mut settings) = state.settings.lock() {
@@ -214,14 +318,14 @@ pub fn set_master_volume(state: State<AppState>, volume: f32) -> Result<(), Stri
     let engine_guard = state.engine.lock().map_err(|e| e.to_string())?;
 
     if let Some(ref engine) = *engine_guard {
-        // On Linux, use sink volume for bidirectional sync with system
-        #[cfg(target_os = "linux")]
+        // On Linux and macOS, use sink volume for bidirectional sync with system
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             engine.set_sink_volume(volume).map_err(|e| e.to_string())?;
         }
-        
+
         // On other platforms, use internal volume only
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             engine.set_master_volume(volume).map_err(|e| e.to_string())?;
         }
@@ -260,23 +364,25 @@ pub fn set_dsp_volume(state: State<AppState>, volume: f32) -> Result<(), String>
     }
 }
 
-/// Get current PipeWire sink volume (Linux only)
-/// 
-/// Returns the "Gecko Audio" sink volume as seen by PipeWire/WirePlumber.
+/// Get current system volume (Linux/macOS)
+///
+/// On Linux: Returns the "Gecko Audio" sink volume as seen by PipeWire/WirePlumber.
+/// On macOS: Returns the default output device volume.
 /// This syncs with system volume controls.
 #[tauri::command]
 pub fn get_sink_volume(state: State<AppState>) -> Result<f32, String> {
     let engine_guard = state.engine.lock().map_err(|e| e.to_string())?;
 
-    if let Some(ref engine) = *engine_guard {
-        #[cfg(target_os = "linux")]
+    if let Some(ref _engine) = *engine_guard {
+        // On Linux and macOS, query the actual system volume
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            engine.get_sink_volume().map_err(|e| e.to_string())
+            _engine.get_sink_volume().map_err(|e| e.to_string())
         }
-        
-        #[cfg(not(target_os = "linux"))]
+
+        // On other platforms, return settings value
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            // Return settings value on non-Linux
             if let Ok(settings) = state.settings.lock() {
                 Ok(settings.master_volume)
             } else {
@@ -365,6 +471,9 @@ pub fn list_audio_streams() -> Result<Vec<AudioStreamInfo>, String> {
                             pid: app.pid,
                             is_active: app.is_active,
                             is_routed_to_gecko: false, // TODO: check actual routing
+                            // Linux: All apps are tappable via PipeWire
+                            is_tappable: true,
+                            untappable_reason: None,
                         })
                         .collect()),
                     Err(e) => Err(format!("Failed to list applications: {}", e)),
@@ -374,9 +483,34 @@ pub fn list_audio_streams() -> Result<Vec<AudioStreamInfo>, String> {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
-        // Return empty list on non-Linux platforms for now
+        // Call coreaudio functions directly to avoid creating/dropping a full backend
+        // which causes noisy "CoreAudio backend shut down" logs
+        match gecko_platform::macos::coreaudio::list_audio_applications() {
+            Ok(apps) => Ok(apps
+                .into_iter()
+                .map(|app| {
+                    // Check if app is tappable (Safari and system apps are not)
+                    let (is_tappable, untappable_reason) = check_app_tappability(&app.name, app.pid);
+                    AudioStreamInfo {
+                        id: format!("{}:{}", app.name, app.pid),
+                        name: app.name,
+                        pid: app.pid,
+                        is_active: app.is_active,
+                        is_routed_to_gecko: false, // TODO: check if we're capturing this PID
+                        is_tappable,
+                        untappable_reason,
+                    }
+                })
+                .collect()),
+            Err(e) => Err(format!("Failed to list applications: {}", e)),
+        }
+    }
+
+    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+    {
+        // Return empty list on other platforms
         Ok(Vec::new())
     }
 }
@@ -595,4 +729,159 @@ pub fn set_soft_clip(state: State<AppState>, enabled: bool) -> Result<(), String
     }
 
     Ok(())
+}
+
+// ============================================================================
+// macOS-specific commands
+// ============================================================================
+
+/// Get macOS audio capture capabilities
+///
+/// Returns detailed info about what audio capture methods are available.
+/// Per-app audio capture requires macOS 14.4+ (Process Tap API).
+#[tauri::command]
+pub fn get_macos_audio_info() -> serde_json::Value {
+    #[cfg(target_os = "macos")]
+    {
+        use gecko_platform::macos::{
+            has_screen_recording_permission, is_process_tap_available, macos_version,
+        };
+
+        let version = macos_version();
+        let version_str = format!("{}.{}.{}", version.0, version.1, version.2);
+
+        let process_tap_available = is_process_tap_available();
+        let has_permission = has_screen_recording_permission();
+
+        // Per-app audio is only truly available if we have both the API and permission
+        let per_app_ready = process_tap_available && has_permission;
+
+        serde_json::json!({
+            "macos_version": version_str,
+            "macos_version_tuple": [version.0, version.1, version.2],
+            "process_tap_available": process_tap_available,
+            "has_screen_recording_permission": has_permission,
+            "per_app_audio_available": per_app_ready,
+            "needs_permission": process_tap_available && !has_permission,
+            "minimum_version_required": "14.4",
+            "limitations": {
+                "safari_supported": false,
+                "system_apps_supported": false,
+                "reason": "Apple sandboxing prevents capturing audio from Safari and system applications"
+            },
+            "message": if !process_tap_available {
+                "Per-app audio capture requires macOS 14.4+. Only master EQ is available."
+            } else if !has_permission {
+                "Screen Recording permission required for per-app audio capture. Click 'Request Permission' to enable."
+            } else {
+                "Per-app audio capture available via Process Tap API"
+            }
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        serde_json::json!({
+            "macos_version": null,
+            "process_tap_available": false,
+            "has_screen_recording_permission": false,
+            "per_app_audio_available": false,
+            "needs_permission": false,
+            "message": "Not running on macOS"
+        })
+    }
+}
+
+/// Check if Screen Recording permission has been granted (macOS only)
+///
+/// Process Tap API requires Screen Recording permission to capture audio from other apps.
+/// This is an Apple privacy requirement - audio capture is considered similar to screen recording.
+#[tauri::command]
+pub fn check_screen_recording_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use gecko_platform::macos::has_screen_recording_permission;
+        has_screen_recording_permission()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true // Permission not needed on non-macOS
+    }
+}
+
+/// Request Screen Recording permission (macOS only)
+///
+/// This will show the system permission dialog if the user hasn't responded yet.
+/// If the user previously denied permission, this will open System Settings.
+///
+/// Returns true if permission is granted, false otherwise.
+/// Note: The app may need to be restarted after granting permission for it to take effect.
+#[tauri::command]
+pub fn request_screen_recording_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use gecko_platform::macos::request_screen_recording_permission;
+        request_screen_recording_permission()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true // Permission not needed on non-macOS
+    }
+}
+
+/// Start capturing audio from a specific application (macOS only)
+///
+/// Uses the Process Tap API (macOS 14.4+) to capture the app's audio stream.
+/// The captured audio is mixed with other captured apps and processed through EQ.
+#[tauri::command]
+pub fn start_app_capture(state: State<AppState>, pid: u32, app_name: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tracing::info;
+
+        info!("Starting capture for {} (PID {})", app_name, pid);
+
+        let engine_guard = state.engine.lock().map_err(|e| e.to_string())?;
+
+        if let Some(ref engine) = *engine_guard {
+            engine
+                .start_app_capture(pid, app_name)
+                .map_err(|e| e.to_string())
+        } else {
+            Err("Engine not initialized".into())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (state, pid, app_name);
+        Err("App capture is only available on macOS".to_string())
+    }
+}
+
+/// Stop capturing audio from a specific application (macOS only)
+#[tauri::command]
+pub fn stop_app_capture(state: State<AppState>, pid: u32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tracing::info;
+
+        info!("Stopping capture for PID {}", pid);
+
+        let engine_guard = state.engine.lock().map_err(|e| e.to_string())?;
+
+        if let Some(ref engine) = *engine_guard {
+            engine.stop_app_capture(pid).map_err(|e| e.to_string())
+        } else {
+            Err("Engine not initialized".into())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (state, pid);
+        Err("App capture is only available on macOS".to_string())
+    }
 }

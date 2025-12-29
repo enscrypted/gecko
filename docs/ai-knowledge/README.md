@@ -21,7 +21,7 @@ This folder contains documented knowledge to reduce token usage and improve agen
 | [realtime-rules.md](architecture/realtime-rules.md) | Writing code that runs in audio callbacks |
 | [platform-linux.md](architecture/platform-linux.md) | Working on PipeWire/Linux support (✅ FULLY IMPLEMENTED) |
 | [platform-windows.md](architecture/platform-windows.md) | Working on WASAPI/Windows support (stub) |
-| [platform-macos.md](architecture/platform-macos.md) | Working on CoreAudio/macOS support (stub) |
+| [platform-macos.md](architecture/platform-macos.md) | Working on CoreAudio/macOS support (✅ IMPLEMENTED - macOS 14.4+ Process Tap API) |
 
 ### Features
 

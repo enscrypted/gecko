@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Audio capture permission for Process Tap API (macOS 14.4+) -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Gecko Audio needs access to capture audio from applications to apply per-app EQ.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Gecko Audio needs access to capture audio from applications to apply per-app EQ.</string>
+
+    <!-- Screen Recording permission (required for Process Tap on macOS 14.4+) -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Gecko Audio needs Screen Recording permission to capture audio from applications using the Process Tap API.</string>
+</dict>
+</plist>

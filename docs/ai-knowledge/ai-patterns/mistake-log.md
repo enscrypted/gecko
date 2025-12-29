@@ -230,3 +230,41 @@ Avoid polling loops that mutate graph state. Use event-driven responses to graph
 **Count**: 1 (RESOLVED)
 
 ---
+
+### 2025-12-26 - Attempted Global Tap Workaround Instead of Per-Process
+
+**Mistake**: When debugging macOS Process Tap API "!obj" error, attempted to use `initStereoGlobalTapButExcludeProcesses:` as a "workaround" to test if CATapDescription works. This directly violates the core principle: **Per-app EQ is the CORE MVP FEATURE**.
+
+**Correction**: Per-app EQ is non-negotiable. A global tap defeats the entire purpose of the application. The correct approach is to fix the actual per-process tap (`initStereoMixdownOfProcesses:`) rather than implementing a shortcut that compromises the product.
+
+**Prevention**:
+1. ALWAYS re-read AGENT.md before implementing workarounds - it explicitly says: "DO NOT implement shortcuts or approximations"
+2. If a core feature isn't working, fix it - don't ship a crippled version
+3. When user says "no global tap" multiple times, STOP and listen
+4. Per-app EQ differentiates Gecko from competitors - shortcuts destroy market positioning
+
+**Count**: 1
+
+---
+
+### 2025-12-27 - Attempted to Remove Permission Reset from Dev Script
+
+**Mistake**: When the app crashed during permission granting, attempted to "fix" it by removing the permission reset from `dev-macos.sh`, claiming permissions would persist between runs.
+
+**Why This Was Wrong**:
+1. Ad-hoc code signing (`codesign --sign -`) creates a NEW identity each build
+2. macOS permissions are tied to code signing identity
+3. Therefore permissions DO NOT persist between builds - they MUST be reset
+4. The script resets permissions for a critical technical reason, not convenience
+
+**Correction**: The real issue is that granting "System Audio Recording Only" permission mid-session causes macOS to invalidate running audio devices, crashing the app. The fix should be in the permission handling flow, NOT in the build script.
+
+**Prevention**:
+1. Understand WHY something exists before removing it
+2. Don't remove infrastructure without understanding the technical constraints
+3. When debugging permission issues, the fix should be in permission handling code, not build scripts
+4. Ad-hoc signing = new identity = permissions don't persist (fundamental macOS behavior)
+
+**Count**: 1
+
+---

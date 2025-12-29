@@ -35,8 +35,8 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 
-// Note: HostTrait is used on non-Linux platforms for device enumeration
-#[cfg(not(target_os = "linux"))]
+// Note: HostTrait is used on non-Linux/non-macOS platforms for device enumeration
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
 use cpal::traits::HostTrait;
 use tracing::{debug, error, info, warn};
 
@@ -49,6 +49,37 @@ use crate::stream::AudioStream;
 // Platform backend for audio routing
 #[cfg(target_os = "linux")]
 use gecko_platform::{PlatformBackend, VirtualSinkConfig};
+
+// macOS: CoreAudio backend with Process Tap (14.4+) or HAL plugin
+#[cfg(target_os = "macos")]
+use gecko_platform::macos::{
+    AudioMixer, AudioOutputStream, AudioProcessingState, CoreAudioBackend,
+};
+#[cfg(target_os = "macos")]
+use gecko_platform::PlatformBackend as _; // Import trait to bring methods into scope
+
+/// Helper to map PIDs to app names using AppleScript (macOS only)
+/// Returns a HashMap of PID -> app name
+#[cfg(target_os = "macos")]
+fn get_pid_to_app_name_map() -> std::collections::HashMap<u32, String> {
+    use gecko_platform::macos::coreaudio::list_audio_applications;
+
+    let mut map = std::collections::HashMap::new();
+    if let Ok(apps) = list_audio_applications() {
+        for app in apps {
+            map.insert(app.pid, app.name);
+        }
+    }
+    map
+}
+
+/// Check if a process is still running (macOS only)
+/// Returns true if the process exists, false if it has exited
+#[cfg(target_os = "macos")]
+fn is_process_running(pid: u32) -> bool {
+    // kill(pid, 0) returns 0 if process exists, -1 if not
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
 
 /// The main audio engine controller
 ///
@@ -146,6 +177,22 @@ impl AudioEngine {
     /// Master EQ (applied after mixing) still affects the audio unless globally bypassed.
     pub fn set_app_bypass(&self, app_name: String, bypassed: bool) -> EngineResult<()> {
         self.send_command(Command::SetAppBypass { app_name, bypassed })
+    }
+
+    /// Start capturing audio from a specific application (macOS only)
+    ///
+    /// Uses the Process Tap API (macOS 14.4+) to capture the app's audio stream.
+    /// The captured audio is mixed with other captured apps and processed through
+    /// the master EQ before output.
+    #[cfg(target_os = "macos")]
+    pub fn start_app_capture(&self, pid: u32, app_name: String) -> EngineResult<()> {
+        self.send_command(Command::StartAppCapture { pid, app_name })
+    }
+
+    /// Stop capturing audio from a specific application (macOS only)
+    #[cfg(target_os = "macos")]
+    pub fn stop_app_capture(&self, pid: u32) -> EngineResult<()> {
+        self.send_command(Command::StopAppCapture { pid })
     }
 
     /// Set per-app volume (0.0 - 2.0, where 1.0 is unity gain)
@@ -309,6 +356,47 @@ impl AudioEngine {
         self.send_command(Command::SetMasterVolume(volume))
     }
 
+    /// Get the system output volume (macOS only)
+    ///
+    /// Returns the volume of the default output device.
+    /// This syncs with system volume controls (menu bar, keyboard).
+    #[cfg(target_os = "macos")]
+    pub fn get_sink_volume(&self) -> EngineResult<f32> {
+        use gecko_platform::macos::get_system_volume;
+
+        match get_system_volume() {
+            Ok(volume) => {
+                // Also update DSP master volume to match system
+                let _ = self.send_command(Command::SetMasterVolume(volume));
+                Ok(volume)
+            }
+            Err(e) => {
+                warn!("Failed to get system volume: {}", e);
+                Ok(1.0) // Default to full volume on error
+            }
+        }
+    }
+
+    /// Set the system output volume (macOS only)
+    ///
+    /// Sets both the system volume (menu bar, keyboard) and internal master volume.
+    /// This syncs Gecko with the system volume controls.
+    #[cfg(target_os = "macos")]
+    pub fn set_sink_volume(&self, volume: f32) -> EngineResult<()> {
+        use gecko_platform::macos::set_system_volume;
+
+        let volume = volume.clamp(0.0, 1.0);
+
+        // Set system volume
+        if let Err(e) = set_system_volume(volume) {
+            warn!("Failed to set system volume: {}", e);
+            // Continue anyway to update internal volume
+        }
+
+        // Also update internal master volume
+        self.send_command(Command::SetMasterVolume(volume))
+    }
+
     /// Set global bypass state (bypasses ALL processing including master EQ)
     pub fn set_bypass(&self, bypassed: bool) -> EngineResult<()> {
         self.send_command(Command::SetBypass(bypassed))
@@ -380,6 +468,34 @@ impl AudioEngine {
         // Linux: Store PipeWire backend for command forwarding
         #[cfg(target_os = "linux")]
         let mut linux_backend: Option<gecko_platform::linux::PipeWireBackend> = None;
+
+        // macOS: Store CoreAudio backend for command forwarding
+        #[cfg(target_os = "macos")]
+        let mut macos_backend: Option<CoreAudioBackend> = None;
+        // macOS: Audio output components (mixer, state, output stream)
+        #[cfg(target_os = "macos")]
+        let mut macos_mixer: Option<Arc<AudioMixer>> = None;
+        #[cfg(target_os = "macos")]
+        let mut macos_state: Option<Arc<AudioProcessingState>> = None;
+        #[cfg(target_os = "macos")]
+        let mut _macos_output: Option<AudioOutputStream> = None;
+        // macOS: Timer for periodic app scanning (every 2 seconds for new apps)
+        #[cfg(target_os = "macos")]
+        let mut last_app_scan = std::time::Instant::now();
+        #[cfg(target_os = "macos")]
+        let app_scan_interval = std::time::Duration::from_secs(2);
+        // macOS: Timer for debug stats logging (every 5 seconds)
+        #[cfg(target_os = "macos")]
+        let mut last_debug_stats = std::time::Instant::now();
+        #[cfg(target_os = "macos")]
+        let debug_stats_interval = std::time::Duration::from_secs(5);
+        // macOS: Channel for receiving app scan results from background thread
+        // Tuple: (audio-active PIDs, PID->app name map)
+        #[cfg(target_os = "macos")]
+        let (app_scan_tx, app_scan_rx) = crossbeam_channel::bounded::<(Vec<i32>, std::collections::HashMap<u32, String>)>(1);
+        // macOS: Flag to track if a scan is in progress
+        #[cfg(target_os = "macos")]
+        let app_scan_in_progress = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // Linux: Timer for checking default sink changes (every 500ms for responsiveness)
         #[cfg(target_os = "linux")]
@@ -610,8 +726,156 @@ impl AudioEngine {
                                 }
                             }
 
-                            // Non-Linux platforms: fall back to output-only mode
-                            #[cfg(not(target_os = "linux"))]
+                            // macOS: Use CoreAudio backend with Process Tap (14.4+) or HAL plugin
+                            #[cfg(target_os = "macos")]
+                            {
+                                info!("Initializing CoreAudio backend for macOS audio routing");
+
+                                match CoreAudioBackend::new() {
+                                    Ok(mut backend) => {
+                                        info!(
+                                            "CoreAudio backend initialized: {} (Process Tap: {})",
+                                            backend.name(),
+                                            backend.uses_process_tap()
+                                        );
+
+                                        // Create audio processing state and mixer for output
+                                        let state = Arc::new(AudioProcessingState::with_sample_rate(
+                                            config.stream.sample_rate as f32,
+                                        ));
+                                        let mixer = Arc::new(AudioMixer::new());
+
+                                        // Set initial state
+                                        state.set_master_volume(master_volume);
+                                        state.set_bypassed(bypassed);
+
+                                        // Apply stored Master EQ gains to the processing state
+                                        for (band, &gain_db) in master_eq_gains.iter().enumerate() {
+                                            if gain_db.abs() > 0.001 {
+                                                state.set_eq_band(band, gain_db);
+                                            }
+                                        }
+
+                                        // Create audio output stream (cpal-based)
+                                        match AudioOutputStream::new_with_mixer(
+                                            Arc::clone(&state),
+                                            Arc::clone(&mixer),
+                                        ) {
+                                            Ok(output) => {
+                                                info!(
+                                                    "Audio output stream created: {} Hz, {} channels",
+                                                    output.sample_rate(),
+                                                    output.channels()
+                                                );
+
+                                                // Set initial state on backend (for per-app tracking)
+                                                backend.set_volume(master_volume);
+                                                backend.set_bypass(bypassed);
+
+                                                // Apply stored Master EQ gains to backend
+                                                for (band, &gain_db) in master_eq_gains.iter().enumerate() {
+                                                    if gain_db.abs() > 0.001 {
+                                                        backend.update_eq_band(band, gain_db);
+                                                    }
+                                                }
+
+                                                // Apply stored App Volumes
+                                                for (app_name, &vol) in &app_volumes {
+                                                    backend.set_app_volume(app_name, vol);
+                                                }
+
+                                                // Apply stored App Bypass
+                                                for (app_name, &bypass) in &app_bypassed {
+                                                    backend.set_app_bypass(app_name, bypass);
+                                                }
+
+                                                // Apply stored App EQ gains
+                                                for (app_name, gains) in &app_eq_gains {
+                                                    for (band, &gain_db) in gains.iter().enumerate() {
+                                                        if gain_db.abs() > 0.001 {
+                                                            backend.update_stream_eq_band(app_name, band, gain_db);
+                                                        }
+                                                    }
+                                                }
+
+                                                // AUTO-CAPTURE: Try to tap all visible apps
+                                                // Apps not producing audio will fail - that's OK
+                                                // Apps producing audio should be captured successfully
+                                                if backend.uses_process_tap() {
+                                                    use gecko_platform::macos::coreaudio::list_audio_applications;
+
+                                                    // Note: Permission probe was removed - it caused timing issues
+                                                    // that led to crashes. The ProcessTapCapture::new() will handle
+                                                    // permission errors gracefully and return appropriate errors.
+
+                                                    // Try to capture all visible apps
+                                                    // Some will fail (not producing audio, sandboxed) - that's expected
+                                                    match list_audio_applications() {
+                                                        Ok(apps) => {
+                                                            info!("Attempting to capture {} visible apps:", apps.len());
+                                                            for app in &apps {
+                                                                debug!("  - {} (PID {})", app.name, app.pid);
+                                                            }
+
+                                                            let mut captured_count = 0;
+                                                            let mut failed_count = 0;
+                                                            for app in apps {
+                                                                match backend.start_app_capture(&app.name, app.pid) {
+                                                                    Ok(_tap_id) => {
+                                                                        // Add ring buffer to mixer with app name for per-app volume lookup
+                                                                        if let Some(ring_buffer) = backend.get_ring_buffer(app.pid) {
+                                                                            mixer.add_source(app.pid, &app.name, ring_buffer);
+                                                                            info!("✓ Captured: {} (PID {})", app.name, app.pid);
+                                                                            captured_count += 1;
+                                                                        }
+                                                                    }
+                                                                    Err(e) => {
+                                                                        // Expected for apps not producing audio or sandboxed
+                                                                        debug!("✗ Could not capture {} (PID {}): {}", app.name, app.pid, e);
+                                                                        failed_count += 1;
+                                                                    }
+                                                                }
+                                                            }
+                                                            info!("Capture complete: {} captured, {} skipped (not producing audio or sandboxed)",
+                                                                  captured_count, failed_count);
+                                                        }
+                                                        Err(e) => {
+                                                            warn!("Failed to enumerate apps: {}", e);
+                                                        }
+                                                    }
+                                                }
+
+                                                // Store all components
+                                                macos_backend = Some(backend);
+                                                macos_mixer = Some(mixer);
+                                                macos_state = Some(state);
+                                                _macos_output = Some(output);
+
+                                                is_running.store(true, Ordering::SeqCst);
+                                                let _ = event_sender.send(Event::Started);
+                                                info!("CoreAudio backend active with audio output - engine started");
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to create audio output stream: {}", e);
+                                                let _ = event_sender.send(Event::error(format!(
+                                                    "Failed to create audio output: {}",
+                                                    e
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to initialize CoreAudio backend: {}", e);
+                                        let _ = event_sender.send(Event::error(format!(
+                                            "CoreAudio not available: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            }
+
+                            // Windows/Other platforms: fall back to output-only mode
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
                             {
                                 let host = cpal::default_host();
                                 let output_device = match host.default_output_device() {
@@ -697,8 +961,23 @@ impl AudioEngine {
                                 current_output_sink_id = None;
                             }
 
-                            // Non-Linux: Stop audio stream
-                            #[cfg(not(target_os = "linux"))]
+                            // macOS: Stop CoreAudio backend and audio output
+                            #[cfg(target_os = "macos")]
+                            {
+                                // Stop output stream first (drops cpal stream)
+                                _macos_output = None;
+                                // Clear mixer and state
+                                macos_mixer = None;
+                                macos_state = None;
+                                // Shutdown backend
+                                if let Some(ref mut backend) = macos_backend {
+                                    backend.shutdown();
+                                }
+                                macos_backend = None;
+                            }
+
+                            // Windows/Other: Stop audio stream
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
                             if stream.is_none() {
                                 debug!("Engine not running");
                                 continue;
@@ -719,8 +998,19 @@ impl AudioEngine {
                                 backend.set_volume(master_volume);
                             }
 
-                            // Non-Linux: Forward to audio stream
-                            #[cfg(not(target_os = "linux"))]
+                            // macOS: Forward to CoreAudio backend AND processing state
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Some(ref mut backend) = macos_backend {
+                                    backend.set_volume(master_volume);
+                                }
+                                if let Some(ref state) = macos_state {
+                                    state.set_master_volume(master_volume);
+                                }
+                            }
+
+                            // Windows/Other: Forward to audio stream
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
                             if let Some(ref s) = stream {
                                 s.set_master_volume(master_volume);
                             }
@@ -735,8 +1025,19 @@ impl AudioEngine {
                                 backend.set_bypass(bypassed);
                             }
 
-                            // Non-Linux: Forward to audio stream
-                            #[cfg(not(target_os = "linux"))]
+                            // macOS: Forward to CoreAudio backend AND processing state
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Some(ref mut backend) = macos_backend {
+                                    backend.set_bypass(bypassed);
+                                }
+                                if let Some(ref state) = macos_state {
+                                    state.set_bypassed(bypassed);
+                                }
+                            }
+
+                            // Windows/Other: Forward to audio stream
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
                             if let Some(ref s) = stream {
                                 s.set_bypass(bypassed);
                             }
@@ -749,6 +1050,13 @@ impl AudioEngine {
                             #[cfg(target_os = "linux")]
                             if let Some(ref backend) = linux_backend {
                                 backend.set_soft_clip_enabled(enabled);
+                            }
+
+                            // macOS: TODO - Forward to CoreAudio backend when implemented
+                            #[cfg(target_os = "macos")]
+                            {
+                                let _ = enabled; // Suppress unused warning
+                                // TODO: Implement soft clip forwarding for macOS
                             }
                         }
 
@@ -765,17 +1073,43 @@ impl AudioEngine {
                             if let Some(ref backend) = linux_backend {
                                 backend.update_eq_band(band, gain_db);
                             }
+
+                            // macOS: Forward to CoreAudio backend EQ AND processing state
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Some(ref mut backend) = macos_backend {
+                                    backend.update_eq_band(band, gain_db);
+                                }
+                                // Update the actual EQ processor in processing state
+                                if let Some(ref state) = macos_state {
+                                    state.set_eq_band(band, gain_db);
+                                }
+                            }
                         }
 
                         Command::SetStreamBandGain { stream_id, band, gain_db } => {
                             debug!("Set stream '{}' band {} gain to {}dB", stream_id, band, gain_db);
-                            
-                            // Extract app name for persistence
+
+                            // Extract app name from stream_id
+                            // Format varies by platform:
+                            //   - Linux: "PID:Name" (name is after colon)
+                            //   - macOS: "Name:PID" (name is before colon)
+                            #[cfg(target_os = "linux")]
                             let app_name = if let Some((_, name)) = stream_id.split_once(':') {
                                 name.to_string()
                             } else {
                                 stream_id.clone()
                             };
+
+                            #[cfg(target_os = "macos")]
+                            let app_name = if let Some((name, _)) = stream_id.split_once(':') {
+                                name.to_string()
+                            } else {
+                                stream_id.clone()
+                            };
+
+                            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                            let app_name = stream_id.clone();
 
                             // Update local state
                             if band < 10 {
@@ -788,6 +1122,18 @@ impl AudioEngine {
                             #[cfg(target_os = "linux")]
                             if let Some(ref backend) = linux_backend {
                                 backend.update_stream_eq_band(&stream_id, band, gain_db);
+                            }
+
+                            // macOS: Forward to CoreAudio backend AND processing state for per-app EQ
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Some(ref mut backend) = macos_backend {
+                                    backend.update_stream_eq_band(&app_name, band, gain_db);
+                                }
+                                // Also update processing state so mixer can apply per-app EQ offset
+                                if let Some(ref state) = macos_state {
+                                    state.set_app_eq_offset(&app_name, band, gain_db);
+                                }
                             }
                         }
 
@@ -802,29 +1148,150 @@ impl AudioEngine {
                             if let Some(ref backend) = linux_backend {
                                 backend.set_app_bypass(&app_name, app_bypassed_val);
                             }
+
+                            // macOS: Forward to CoreAudio backend AND processing state for per-app bypass
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Some(ref mut backend) = macos_backend {
+                                    backend.set_app_bypass(&app_name, app_bypassed_val);
+                                }
+                                // Also update processing state so mixer can check per-app bypass
+                                if let Some(ref state) = macos_state {
+                                    state.set_app_bypassed(&app_name, app_bypassed_val);
+                                }
+                            }
                         }
 
                         Command::SetStreamVolume { stream_id, volume } => {
-                            // Extract app name from stream_id (format: "pid:name")
-                            // Backend lookup uses just the app name (second part), but validation
-                            // requires us to handle cases where it might just be the name.
-                            //
-                            // Fix: previously we took the first part (PID), which caused mismatch.
+                            // Extract app name from stream_id
+                            // Format varies by platform:
+                            //   - Linux: "PID:Name" (name is after colon)
+                            //   - macOS: "Name:PID" (name is before colon)
+                            #[cfg(target_os = "linux")]
                             let app_name = if let Some((_, name)) = stream_id.split_once(':') {
-                                name
+                                name.to_string()
                             } else {
-                                &stream_id
+                                stream_id.clone()
                             };
-                            
+
+                            #[cfg(target_os = "macos")]
+                            let app_name = if let Some((name, _)) = stream_id.split_once(':') {
+                                name.to_string()
+                            } else {
+                                stream_id.clone()
+                            };
+
+                            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                            let app_name = stream_id.clone();
+
                             debug!("Set app '{}' volume to {:.2} (stream_id: {})", app_name, volume, stream_id);
 
                             // Update local state for persistence
-                            app_volumes.insert(app_name.to_string(), volume);
+                            app_volumes.insert(app_name.clone(), volume);
 
                             // Linux: Forward to PipeWire backend per-app volume
                             #[cfg(target_os = "linux")]
                             if let Some(ref backend) = linux_backend {
-                                backend.set_app_volume(app_name, volume);
+                                backend.set_app_volume(&app_name, volume);
+                            }
+
+                            // macOS: Forward to CoreAudio backend AND processing state for per-app volume
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Some(ref mut backend) = macos_backend {
+                                    backend.set_app_volume(&app_name, volume);
+                                }
+                                // Also update processing state so mixer can apply per-app volume
+                                if let Some(ref state) = macos_state {
+                                    state.set_app_volume(&app_name, volume);
+                                }
+                            }
+                        }
+
+                        Command::StartAppCapture { pid, app_name } => {
+                            debug!("Start app capture: {} (PID {})", app_name, pid);
+
+                            // macOS: Start Process Tap capture and add to mixer
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let (Some(ref mut backend), Some(ref mixer)) =
+                                    (&mut macos_backend, &macos_mixer)
+                                {
+                                    // start_app_capture takes (&str, u32) and returns Result<u32, _>
+                                    match backend.start_app_capture(&app_name, pid) {
+                                        Ok(_tap_id) => {
+                                            info!("Started capture for {} (PID {})", app_name, pid);
+
+                                            // Get the ring buffer for this capture and add to mixer with app name for per-app volume lookup
+                                            if let Some((_, ring_buffer)) = backend
+                                                .get_ring_buffers()
+                                                .into_iter()
+                                                .find(|(p, _)| *p == pid)
+                                            {
+                                                mixer.add_source(pid, &app_name, ring_buffer);
+                                                info!("Added {} to audio mixer", app_name);
+
+                                                // Notify UI that stream was discovered
+                                                let _ = event_sender.send(Event::StreamDiscovered {
+                                                    app_name: app_name.clone(),
+                                                    node_id: pid,
+                                                });
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to start capture for {}: {}", app_name, e);
+                                            let _ = event_sender.send(Event::error(format!(
+                                                "Failed to capture {}: {}",
+                                                app_name, e
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Other platforms: no-op (capture is handled differently)
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                let _ = (pid, app_name); // Suppress unused warnings
+                                debug!("App capture not implemented on this platform");
+                            }
+                        }
+
+                        Command::StopAppCapture { pid } => {
+                            debug!("Stop app capture: PID {}", pid);
+
+                            // macOS: Stop Process Tap capture and remove from mixer
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let (Some(ref mut backend), Some(ref mixer)) =
+                                    (&mut macos_backend, &macos_mixer)
+                                {
+                                    // Get app name before removing (for event) - clone to avoid borrow issues
+                                    let app_name = backend.get_app_name(pid).map(|s| s.to_string());
+
+                                    // Remove from mixer first
+                                    mixer.remove_source(pid);
+
+                                    // Stop the capture
+                                    if let Err(e) = backend.stop_app_capture(pid) {
+                                        warn!("Failed to stop capture for PID {}: {}", pid, e);
+                                    } else {
+                                        info!("Stopped capture for PID {}", pid);
+                                    }
+
+                                    // Notify UI that stream was removed
+                                    if let Some(name) = app_name {
+                                        let _ = event_sender.send(Event::StreamRemoved {
+                                            app_name: name,
+                                        });
+                                    }
+                                }
+                            }
+
+                            // Other platforms: no-op
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                let _ = pid; // Suppress unused warning
                             }
                         }
 
@@ -836,7 +1303,9 @@ impl AudioEngine {
                         Command::RequestState => {
                             #[cfg(target_os = "linux")]
                             let running = linux_backend.is_some();
-                            #[cfg(not(target_os = "linux"))]
+                            #[cfg(target_os = "macos")]
+                            let running = macos_backend.is_some();
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
                             let running = stream.is_some();
 
                             let state = Event::StateUpdate {
@@ -892,8 +1361,115 @@ impl AudioEngine {
                         }
                     }
 
-                    // Non-Linux: Get peaks from audio stream
-                    #[cfg(not(target_os = "linux"))]
+                    // macOS: Get peaks and spectrum from processing state
+                    #[cfg(target_os = "macos")]
+                    if let Some(ref state) = macos_state {
+                        let (l, r) = state.peaks();
+                        // Only send if there's actual audio
+                        if l > 0.001 || r > 0.001 {
+                            let _ = event_sender.try_send(Event::LevelUpdate { left: l, right: r });
+                        }
+
+                        // Update spectrum analyzer and send data if ready (~60fps)
+                        let spectrum_updated = state.update_spectrum();
+                        if spectrum_updated {
+                            let spectrum = state.get_spectrum();
+                            let bins = spectrum.to_vec();
+                            let _ = event_sender.try_send(Event::SpectrumUpdate { bins });
+                        }
+                    }
+
+                    // macOS: Periodic scanning for new audio-active processes
+                    // Key insight: Only processes ACTIVELY PLAYING AUDIO can be tapped.
+                    // We keep existing taps even if audio pauses (e.g., between YouTube videos).
+                    // We only remove taps when the PROCESS EXITS completely.
+                    #[cfg(target_os = "macos")]
+                    if is_running.load(Ordering::Relaxed) {
+                        // Check for completed scan results (non-blocking)
+                        // The scan now returns audio-active PIDs and pid->name map
+                        if let Ok((audio_pids, pid_names)) = app_scan_rx.try_recv() {
+                            app_scan_in_progress.store(false, Ordering::Relaxed);
+
+                            if let (Some(ref mut backend), Some(ref mixer)) = (&mut macos_backend, &macos_mixer) {
+                                // Add new taps for audio-active processes not already captured
+                                for pid in &audio_pids {
+                                    let pid_u32 = *pid as u32;
+                                    if !backend.is_capturing(pid_u32) {
+                                        let app_name = pid_names.get(&pid_u32)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!("PID {}", pid));
+
+                                        match backend.start_app_capture(&app_name, pid_u32) {
+                                            Ok(_tap_id) => {
+                                                // Add to mixer with app name for per-app volume lookup
+                                                if let Some(ring_buffer) = backend.get_ring_buffer(pid_u32) {
+                                                    mixer.add_source(pid_u32, &app_name, ring_buffer);
+                                                    info!("Auto-captured new audio-active app: {} (PID {})", app_name, pid);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                debug!("Could not capture audio-active app {}: {}", app_name, e);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Remove captures ONLY for processes that have EXITED
+                                // We keep taps even if audio pauses (between videos, etc.)
+                                let captured_pids = backend.captured_pids();
+                                for pid in captured_pids {
+                                    if !is_process_running(pid) {
+                                        // Process has exited - clean up the tap
+                                        let app_name = pid_names.get(&pid)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!("PID {}", pid));
+
+                                        if let Err(e) = backend.stop_app_capture(pid) {
+                                            debug!("Error stopping capture for exited app PID {}: {}", pid, e);
+                                        }
+                                        mixer.remove_source(pid);
+                                        info!("Removed capture for exited app: {} (PID {})", app_name, pid);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Start new scan if interval elapsed and no scan in progress
+                        if last_app_scan.elapsed() >= app_scan_interval
+                            && !app_scan_in_progress.load(Ordering::Relaxed)
+                        {
+                            last_app_scan = std::time::Instant::now();
+                            app_scan_in_progress.store(true, Ordering::Relaxed);
+
+                            // Spawn background thread for the scan
+                            // Gets audio-active PIDs (fast) and PID->name map (slower AppleScript)
+                            let tx = app_scan_tx.clone();
+                            std::thread::spawn(move || {
+                                use gecko_platform::macos::get_audio_active_pids;
+
+                                let audio_pids = get_audio_active_pids();
+                                let pid_names = get_pid_to_app_name_map();
+                                let _ = tx.send((audio_pids, pid_names));
+                            });
+                        }
+
+                        // Debug stats logging (every 5 seconds)
+                        if last_debug_stats.elapsed() >= debug_stats_interval {
+                            last_debug_stats = std::time::Instant::now();
+
+                            // Log mixer debug stats
+                            let mixer_stats = gecko_platform::macos::get_mixer_debug_stats();
+                            debug!("Audio debug: {}", mixer_stats);
+
+                            // Log tap debug stats
+                            if let Some(ref backend) = macos_backend {
+                                backend.log_tap_debug_stats();
+                            }
+                        }
+                    }
+
+                    // Windows/Other: Get peaks from audio stream
+                    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
                     if let Some(ref s) = stream {
                         let (l, r) = s.get_peaks();
                         // Only send if there's actual audio
@@ -991,6 +1567,18 @@ impl AudioEngine {
         // Linux: Clean up PipeWire backend
         #[cfg(target_os = "linux")]
         drop(linux_backend);
+
+        // macOS: Clean up audio components in order
+        #[cfg(target_os = "macos")]
+        {
+            // Drop output stream first (stops cpal playback)
+            drop(_macos_output);
+            // Drop mixer and state
+            drop(macos_mixer);
+            drop(macos_state);
+            // Drop backend last (cleans up Process Taps)
+            drop(macos_backend);
+        }
 
         is_running.store(false, Ordering::SeqCst);
         info!("Audio thread shutting down");

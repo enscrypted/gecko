@@ -3,9 +3,14 @@ import { amplitudeToPercent } from "../lib/utils";
 
 // Smoothing constants for meter animation
 // Higher decay = smoother but slower falloff
-const METER_DECAY = 0.85;
-// Attack is instant for responsive feel
-const METER_ATTACK = 1.0;
+const METER_DECAY = 0.93;
+// Attack smoothing - slightly slower than instant for smoother rises
+const METER_ATTACK = 0.6;
+
+// Quantization step for display (percent) - prevents micro-oscillation
+// by snapping to discrete positions while still allowing smooth transitions
+// 0.5% steps are imperceptible but eliminate jitter
+const DISPLAY_QUANTIZE = 0.5;
 
 // Color thresholds (percent)
 const WARNING_THRESHOLD = 70;
@@ -68,7 +73,7 @@ export const LevelMeter = memo(forwardRef<LevelMeterHandle, LevelMeterProps>(
       let animationId: number;
 
       const animate = () => {
-        // Apply asymmetric smoothing: instant attack, smooth decay
+        // Apply asymmetric smoothing: smoother attack, smooth decay
         // Left channel
         if (targetLeft.current > smoothedLeft.current) {
           smoothedLeft.current = targetLeft.current * METER_ATTACK +
@@ -88,15 +93,18 @@ export const LevelMeter = memo(forwardRef<LevelMeterHandle, LevelMeterProps>(
         }
 
         // Direct DOM manipulation - bypasses React entirely for smooth 60fps
+        // Quantize display value to prevent micro-oscillation while keeping smooth motion
         if (leftBarRef.current) {
           const percent = amplitudeToPercent(smoothedLeft.current);
-          leftBarRef.current.style.width = `${percent}%`;
+          const quantized = Math.round(percent / DISPLAY_QUANTIZE) * DISPLAY_QUANTIZE;
+          leftBarRef.current.style.width = `${quantized}%`;
           leftBarRef.current.style.backgroundColor = getBarColor(percent);
         }
 
         if (rightBarRef.current) {
           const percent = amplitudeToPercent(smoothedRight.current);
-          rightBarRef.current.style.width = `${percent}%`;
+          const quantized = Math.round(percent / DISPLAY_QUANTIZE) * DISPLAY_QUANTIZE;
+          rightBarRef.current.style.width = `${quantized}%`;
           rightBarRef.current.style.backgroundColor = getBarColor(percent);
         }
 

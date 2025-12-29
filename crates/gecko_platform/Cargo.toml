@@ -31,10 +31,18 @@ windows = { workspace = true, optional = true }
 
 # macOS: CoreAudio bindings (using system frameworks)
 [target.'cfg(target_os = "macos")'.dependencies]
-# coreaudio-rs = { version = "0.11", optional = true }
+coreaudio-sys = "0.2"
+core-foundation = "0.10"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+# cpal for cross-platform audio output
+cpal = "0.15"
+# Objective-C runtime bindings for CATapDescription
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"
 
 [features]
 default = []
 pipewire = ["dep:pipewire"]
 wasapi = ["dep:windows"]
-# coreaudio = ["dep:coreaudio-rs"]

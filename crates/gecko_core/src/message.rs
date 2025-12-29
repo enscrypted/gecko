@@ -31,6 +31,13 @@ pub enum Command {
     /// When bypassed, the app's audio passes through without EQ processing
     SetAppBypass { app_name: String, bypassed: bool },
 
+    /// Start capturing audio from a specific application (macOS only)
+    /// Uses Process Tap API to capture the app's audio stream
+    StartAppCapture { pid: u32, app_name: String },
+
+    /// Stop capturing audio from a specific application (macOS only)
+    StopAppCapture { pid: u32 },
+
     /// Set per-app volume (0.0 - 2.0, where 1.0 is unity gain)
     /// This is independent of master volume and is applied before mixing
     SetStreamVolume { stream_id: String, volume: f32 },

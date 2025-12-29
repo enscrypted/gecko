@@ -1,88 +1,215 @@
-# macOS Implementation Strategy: HAL Plug-In & IPC
+# macOS Implementation Strategy: Process Tap API
 
-## 1. The Virtual Device Driver (HAL)
+**Status**: ✅ IMPLEMENTED (December 2024)
+**Requirement**: macOS 14.4+ (Sonoma 14.4 or later)
 
-macOS requires an **AudioServerPlugIn** to create virtual audio devices.
+## Overview
+
+macOS uses Apple's **Process Tap API** introduced in macOS 14.4 for per-application audio capture. This native API enables per-app EQ without requiring driver installation or kernel extensions.
+
+> **Note**: This document supersedes the original HAL plugin strategy. The Process Tap API provides a simpler, more reliable solution without the complexity of custom audio drivers.
+
+## 1. The Process Tap API
 
 ### 1.1 Architecture
 
-- **Type**: User-Space Driver (running in `coreaudiod`)
-- **Base**: C++ implementation based on AudioServerPlugIn template or libASPL
-- **Bundle ID**: `com.gecko.driver.AudioDevice`
-- **Location**: `/Library/Audio/Plug-Ins/HAL/GeckoAudioDevice.driver`
+- **Type**: Native CoreAudio API (macOS 14.4+)
+- **No Installation Required**: Works out of the box
+- **Per-Process Capture**: Each app can be tapped individually
+- **Permissions**: Requires Screen Recording permission
 
-### 1.2 Functionality
+### 1.2 How It Works
 
-The driver exposes a device named **"Gecko Sink"**.
-
-**I/O Procedure**: When `coreaudiod` calls `IOOperation`, the driver:
-1. Calculates the current cycle time
-2. Writes the incoming audio buffer to a **Shared Memory Ring Buffer**
-3. Updates the atomic write-head index
-
-## 2. Inter-Process Communication (IPC)
-
-Because the Driver and the App run in separate processes, **Shared Memory (SHM)** is the transport.
-
-### 2.1 Memory Layout
-
-```c
-struct GeckoShmHeader {
-    atomic_uint32_t write_head;
-    atomic_uint32_t read_head;
-    uint32_t buffer_size;
-    uint32_t channels;
-    uint32_t sample_rate;
-};
-// Followed by raw float data
+```
+┌─────────────────┐
+│ Application     │  (e.g., Firefox, Spotify)
+│ Audio Output    │
+└────────┬────────┘
+         │ Process Tap API
+         │ AudioHardwareCreateProcessTap()
+         ▼
+┌─────────────────┐
+│ CATapDescription│  Objective-C class describing tap target
+│ - Target PIDs   │  - Uses AudioObjectID (not raw PID)
+│ - Mute option   │  - Can mute original audio path
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Aggregate Device│  Virtual device combining tap
+│ - Input from tap│  - Allows IO proc registration
+│ - Output capable│
+└────────┬────────┘
+         │ IO Proc Callback (real-time)
+         ▼
+┌─────────────────┐
+│ Gecko DSP       │  EQ, Volume, Soft Clipper
+│ Processing      │
+└────────┬────────┘
+         │
+         ▼
+    Speakers (via cpal)
 ```
 
-### 2.2 Synchronization
+### 1.3 Key Functionality
 
-- **Lock-Free**: No mutexes are used across the process boundary (risk of deadlocking `coreaudiod`)
-- **Atomic Operations**: Standard C++11 / Rust `std::sync::atomic` are used
+The Process Tap API provides:
+1. **Per-process audio capture** - Target specific PIDs
+2. **Mute capability** - Route audio exclusively through Gecko
+3. **No driver needed** - Native macOS API
+4. **Low latency** - Direct hardware path
 
-## 3. The Gecko Application (Backend)
+## 2. Implementation Details
 
-### 3.1 Connection Logic
+### 2.1 Creating a Process Tap
 
-1. Gecko App starts
-2. It calls `shm_open("/GeckoAudioShm", O_RDONLY)`
-3. It `mmap`s the region
-4. It wraps this memory in a Rust `AudioSource` struct implementing the `Iterator` trait
-5. This iterator feeds the DSP pipeline
+```rust
+// 1. Convert PID to AudioObjectID
+let object_id = translate_pid_to_audio_object_id(pid)?;
 
-## 4. Deployment & Installation
+// 2. Create CATapDescription (Objective-C)
+let tap_description = TapDescription::with_processes(&[pid])?;
+tap_description.set_mute(true);  // Audio only through Gecko
 
-### Privileges
-Installation requires **root**.
+// 3. Create the tap
+let mut tap_id: AudioHardwareTapID = 0;
+AudioHardwareCreateProcessTap(tap_description.as_ptr(), &mut tap_id);
 
-### Lifecycle
-- **Install**: Copy bundle → `chown root:wheel` → Kickstart `coreaudiod`
-- **Uninstall**: Remove bundle → Kickstart `coreaudiod`
+// 4. Get tap UID for aggregate device
+let tap_uid = get_tap_uid(tap_id)?;
 
-### Tauri Integration
-The installer script (pkg) must handle these steps. The App itself cannot install the driver at runtime without prompting for an admin password via `osascript`.
+// 5. Create aggregate device
+let description = create_aggregate_device_description(&tap_uid, name);
+AudioHardwareCreateAggregateDevice(description, &mut device_id);
 
-## 5. Alternative: Use Existing Drivers
+// 6. Register IO proc for audio data
+AudioDeviceCreateIOProcID(device_id, Some(audio_io_proc), context, &mut io_proc_id);
+AudioDeviceStart(device_id, io_proc_id);
+```
 
-For users who prefer not to install a custom driver, Gecko supports:
+### 2.2 Ring Buffer Data Transfer
 
-- **BlackHole** (free, open-source)
-- **Loopback** by Rogue Amoeba (commercial)
+Audio flows from IO proc to output via lock-free ring buffer:
 
-These appear as standard audio devices that Gecko can use via CPAL.
+```rust
+// IO Proc callback (real-time thread)
+extern "C" fn audio_io_proc(..., in_input_data: *const AudioBufferList, ...) -> i32 {
+    // CRITICAL: No allocations, no blocking!
+    let samples = get_samples_from_buffer_list(in_input_data);
+    context.ring_buffer.push_slice(samples);  // Lock-free
+    0
+}
 
-## 6. Limitations
+// cpal output callback (audio thread)
+fn output_callback(data: &mut [f32], ring_buffer: &AudioRingBuffer) {
+    ring_buffer.pop_slice(data);  // Lock-free
+    // Apply DSP processing...
+}
+```
 
-- **No Per-Application Capture**: macOS doesn't expose per-app audio APIs
-- **User Must Route Manually**: Users select "Gecko Sink" as output in app preferences or System Preferences
+### 2.3 Critical Discovery: AudioObjectID vs PID
 
-## 7. Implementation Checklist
+The `initStereoMixdownOfProcesses:` method requires **AudioObjectIDs**, not raw PIDs:
 
-- [ ] Fork BlackHole or libASPL for HAL plugin base
-- [ ] Implement shared memory ring buffer in driver
-- [ ] Implement Rust wrapper for `shm_open`/`mmap`
-- [ ] Create macOS installer package (.pkg)
-- [ ] Test on macOS 12+ (Monterey+)
-- [ ] Document driver installation for users
+```rust
+// WRONG: Using raw PID
+let tap = TapDescription::with_processes(&[pid])?;  // Fails!
+
+// CORRECT: Convert PID to AudioObjectID first
+let object_id = translate_pid_to_audio_object_id(pid)?;
+// Then pass AudioObjectID (wrapped in NSNumber) to the method
+```
+
+Use `kAudioHardwarePropertyTranslatePIDToProcessObject` for conversion.
+
+## 3. Permissions
+
+### 3.1 Required Permissions
+
+| Permission | Purpose | User Action |
+|------------|---------|-------------|
+| Screen Recording | Process Tap API is classified as screen capture | System Settings → Privacy → Screen Recording |
+| Microphone | macOS requires this for audio capture APIs | Grant when prompted |
+
+### 3.2 Info.plist Keys
+
+```xml
+<key>NSScreenCaptureUsageDescription</key>
+<string>Gecko needs Screen Recording permission to capture application audio.</string>
+
+<key>NSMicrophoneUsageDescription</key>
+<string>Gecko needs Microphone permission to process application audio.</string>
+```
+
+### 3.3 Permission Flow
+
+1. App checks `CGPreflightScreenCaptureAccess()`
+2. If not granted, calls `CGRequestScreenCaptureAccess()` → Opens System Settings
+3. User enables Gecko in Screen Recording list
+4. **User MUST restart app** (macOS requirement)
+
+## 4. Limitations
+
+### 4.1 Protected Apps (Cannot Be Captured)
+
+Due to Apple's security sandbox, these apps cannot be tapped:
+- **Safari** - WebKit sandboxing
+- **FaceTime** - Privacy protection
+- **Messages** - Privacy protection
+- **System Sounds** - System audio
+
+**Workaround**: These apps receive Master EQ when audio passes through system output.
+
+### 4.2 macOS Version Requirement
+
+- **macOS 14.4+**: Full per-app capture via Process Tap
+- **macOS < 14.4**: **NOT SUPPORTED** - Gecko requires 14.4+
+
+## 5. Comparison with Original HAL Plugin Approach
+
+| Aspect | HAL Plugin (Original Plan) | Process Tap (Implemented) |
+|--------|----------------------------|---------------------------|
+| Installation | Required driver installation | None needed |
+| Permissions | Admin password | Screen Recording only |
+| Complexity | High (C++ plugin, IPC, shared memory) | Low (native Rust FFI) |
+| Per-app capture | No (required manual routing) | Yes (native API) |
+| macOS version | 10.15+ | 14.4+ only |
+| Maintenance | Must update for macOS changes | Apple-supported API |
+
+The Process Tap API provides a significantly better solution despite the higher macOS version requirement.
+
+## 6. Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `crates/gecko_platform/src/macos/mod.rs` | CoreAudioBackend |
+| `crates/gecko_platform/src/macos/process_tap.rs` | ProcessTapCapture |
+| `crates/gecko_platform/src/macos/process_tap_ffi.rs` | Raw FFI bindings |
+| `crates/gecko_platform/src/macos/tap_description.rs` | CATapDescription wrapper |
+| `crates/gecko_platform/src/macos/audio_output.rs` | AudioMixer + cpal output |
+| `crates/gecko_platform/src/macos/coreaudio.rs` | Device/app enumeration |
+| `crates/gecko_platform/src/macos/permissions.rs` | Permission handling |
+
+## 7. References
+
+- [Apple Process Tap Documentation](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps)
+- [AudioCap Sample Implementation](https://github.com/insidegui/AudioCap)
+- [SoundPusher (aggregate device approach)](https://github.com/q-p/SoundPusher)
+- [CoreAudio HAL Tap APIs](https://developer.apple.com/documentation/coreaudio/audio_hardware_tap_services)
+
+## 8. Implementation Checklist
+
+- [x] Process Tap API integration
+- [x] CATapDescription Objective-C bindings
+- [x] AudioObjectID conversion (PID → AudioObjectID)
+- [x] Aggregate device creation
+- [x] IO proc callback registration
+- [x] Lock-free ring buffer data transfer
+- [x] Per-app EQ processing
+- [x] Per-app volume control
+- [x] Master EQ
+- [x] Soft clipper
+- [x] Screen Recording permission handling
+- [x] Protected app detection and UI
+- [x] App discovery with async caching
+- [x] Settings persistence

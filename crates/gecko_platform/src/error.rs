@@ -37,6 +37,15 @@ pub enum PlatformError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
+
+    #[error("Command failed: {0}")]
+    CommandFailed(String),
+
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
 }
 
 #[cfg(test)]

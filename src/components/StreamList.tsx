@@ -9,6 +9,15 @@ interface AudioStream {
   pid: number;
   is_active: boolean;
   is_routed_to_gecko: boolean;
+  /** macOS only: Whether this app can be captured via Process Tap API */
+  is_tappable: boolean;
+  /** macOS only: Reason why the app cannot be tapped (if is_tappable is false) */
+  untappable_reason?: string;
+}
+
+interface MacOSAudioInfo {
+  macos_version: string;
+  process_tap_available: boolean;
 }
 
 /** Extract app name from stream (used for settings persistence) */
@@ -36,6 +45,10 @@ export function StreamList({ disabled = false, isRunning, eqBandCount = 10 }: St
   const [error, setError] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
 
+  // macOS-specific state: detect if Process Tap is available
+  const [isMacOS, setIsMacOS] = useState(false);
+  const [usesProcessTap, setUsesProcessTap] = useState(false);
+
   // Get bypass/hidden state from settings
   // State for streams and volumes
   // hiddenApps and bypassedApps are accessed directly from settings to ensure single source of truth
@@ -46,6 +59,22 @@ export function StreamList({ disabled = false, isRunning, eqBandCount = 10 }: St
       setMasterGains([...settings.master_eq]);
     }
   }, [settings?.master_eq]);
+
+  // Detect macOS platform and Process Tap availability
+  useEffect(() => {
+    const checkMacOS = async () => {
+      try {
+        const info = await invoke<MacOSAudioInfo>("get_macos_audio_info");
+        setIsMacOS(true);
+        setUsesProcessTap(info.process_tap_available);
+      } catch {
+        // Not on macOS or command not available
+        setIsMacOS(false);
+        setUsesProcessTap(false);
+      }
+    };
+    checkMacOS();
+  }, []);
 
   // Track order of streams by when they were first seen (stable ordering)
   const streamOrderRef = useRef<string[]>([]);
@@ -69,18 +98,41 @@ export function StreamList({ disabled = false, isRunning, eqBandCount = 10 }: St
     try {
       const result = await invoke<AudioStream[]>("list_audio_streams");
 
-      const streamMap = new Map(result.map(s => [s.id, s]));
+      const newStreamMap = new Map(result.map(s => [s.id, s]));
 
-      // Preserve order: existing streams first, then new ones
-      const stableOrder = [...streams.map(s => s.id), ...result.map(s => s.id)]
-        .filter((id, index, self) => self.indexOf(id) === index) // Unique IDs
-        .filter(id => streamMap.has(id)); // Only active streams
+      // STICKY STREAMS: Apps stay visible until user hides them or app closes
+      // 1. Keep all existing streams (mark inactive if not in new result)
+      // 2. Add any new streams from result
+      // 3. Only remove if PID no longer exists (process closed)
 
-      const orderedStreams = stableOrder
-        .map(id => streamMap.get(id))
-        .filter((s): s is AudioStream => s !== undefined);
+      const mergedStreams: AudioStream[] = [];
+      const seenIds = new Set<string>();
 
-      setStreams(orderedStreams);
+      // First, update existing streams
+      for (const existingStream of streams) {
+        const newData = newStreamMap.get(existingStream.id);
+        if (newData) {
+          // Stream still active - use new data
+          mergedStreams.push(newData);
+        } else {
+          // Stream no longer in result - mark as inactive but keep it
+          // User can hide it manually if they don't want to see it
+          mergedStreams.push({
+            ...existingStream,
+            is_active: false,
+          });
+        }
+        seenIds.add(existingStream.id);
+      }
+
+      // Then, add any new streams not already tracked
+      for (const newStream of result) {
+        if (!seenIds.has(newStream.id)) {
+          mergedStreams.push(newStream);
+        }
+      }
+
+      setStreams(mergedStreams);
 
       // Initialize gains for new streams only - use functional update to avoid stale closures
       setStreamGains((prev) => {
@@ -260,6 +312,27 @@ export function StreamList({ disabled = false, isRunning, eqBandCount = 10 }: St
     [settings, updateSettings]
   );
 
+  // Handle macOS capture toggle (start/stop Process Tap capture)
+  const handleCaptureToggle = useCallback(
+    async (stream: AudioStream, capture: boolean) => {
+      try {
+        if (capture) {
+          // Start capturing this app's audio via Process Tap
+          await invoke("start_app_capture", { pid: stream.pid, appName: stream.name });
+        } else {
+          // Stop capturing this app's audio
+          await invoke("stop_app_capture", { pid: stream.pid });
+        }
+        // Refresh streams to update is_routed_to_gecko status
+        fetchStreams();
+      } catch (e) {
+        console.error("Failed to toggle app capture:", e);
+        setError(`Failed to ${capture ? "start" : "stop"} capture: ${e}`);
+      }
+    },
+    [fetchStreams]
+  );
+
   // Filter streams into visible and hidden
   const visibleStreams = streams.filter((s) => !(settings?.hidden_apps || []).includes(getAppName(s)));
   const hiddenStreams = streams.filter((s) => (settings?.hidden_apps || []).includes(getAppName(s)));
@@ -340,6 +413,10 @@ export function StreamList({ disabled = false, isRunning, eqBandCount = 10 }: St
               onHide={() => handleHide(getAppName(stream))}
               volume={streamVolumes[stream.id] ?? 1.0}
               onVolumeChange={(volume) => handleStreamVolumeChange(stream.id, volume)}
+              showCaptureToggle={isMacOS && usesProcessTap}
+              onCaptureToggle={(capture) => handleCaptureToggle(stream, capture)}
+              isTappable={stream.is_tappable}
+              untappableReason={stream.untappable_reason}
             />
           ))}
 

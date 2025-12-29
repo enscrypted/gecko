@@ -1,6 +1,20 @@
 # AGENT.md - AI Agent Instructions
 
-This file provides guidance to AI coding agents working with this repository. Tool-specific configurations (.cursor/rules/, .windsurfrules, .agent/rules/, .github/copilot-instructions.md, CLAUDE.md) reference this file.
+Tool-specific configs (`.cursor/rules/`, `.windsurfrules`, `.github/copilot-instructions.md`, `.agent/rules/`, `CLAUDE.md`) reference this file.
+
+---
+
+## QUICK TRIGGERS (Memorize These)
+
+**Session Start**: Check `docs/ai-knowledge/ai-patterns/mistake-log.md` for patterns to avoid.
+
+**During Session**:
+- User says "commit/stage" → run `pre-commit-check`
+- You get corrected → run `log-mistake`
+- KB lookup fails → after solving, run `document-solution`
+- You modify KB files → run `check-kb-index`
+
+**Session End** (user says "done/thanks/bye"): Run `session-end-checklist`
 
 ---
 
@@ -20,7 +34,7 @@ WRONG:    Microphone → Gecko DSP → Speakers  ← NEVER DO THIS!
 Platform-specific capture methods:
 - **Linux**: Create PipeWire virtual sink → Apps route to it → Capture from monitor port
 - **Windows**: WASAPI Process Loopback API → Capture specific app audio
-- **macOS**: HAL Plugin → Shared memory ring buffer
+- **macOS 14.4+**: Process Tap API → Per-app audio capture via `AudioHardwareCreateProcessTap`
 
 **Never use `host.default_input_device()` for audio capture** - that grabs the microphone and causes feedback loops. This is a **system audio processor**, not a voice application.
 
@@ -72,7 +86,7 @@ WRONG Architecture (Additive Approximation - DO NOT USE):
 **Platform Implementation Requirements**:
 - **Linux (PipeWire)**: Create SEPARATE virtual sink per app, capture each independently
 - **Windows (WASAPI)**: Process Loopback API already captures per-process
-- **macOS (CoreAudio)**: HAL plugin intercepts per-app
+- **macOS 14.4+ (CoreAudio)**: Process Tap API captures per-app via `CATapDescription`
 
 **DO NOT implement shortcuts or approximations.** If an agent suggests "additive EQ offsets"
 or "combined gains", they are trying to avoid the real implementation. Reject this approach.
@@ -97,7 +111,7 @@ or "combined gains", they are trying to avoid the real implementation. Reject th
 | IPC | rtrb, crossbeam-channel | Lock-free audio thread communication |
 | Windows | windows-rs | WASAPI Process Loopback |
 | Linux | pipewire-rs | Graph manipulation, virtual sinks |
-| macOS | CoreAudio HAL | AudioServerPlugIn via shared memory |
+| macOS | coreaudio-rs, objc2 | Process Tap API (macOS 14.4+) |
 
 ### Development Commands
 
@@ -318,7 +332,7 @@ const handleBandChange = useCallback(async (index, gainDb) => {
 |----------|-------------|-------|
 | Linux | PipeWire 0.3+ | Most flexible, runtime virtual devices |
 | Windows | 10 Build 20348+ | Per-app capture requires newer API |
-| macOS | 10.15+ | Requires HAL plugin installation |
+| macOS | 14.4+ (Sonoma) | Process Tap API, requires Screen Recording permission |
 
 ---
 
@@ -428,18 +442,66 @@ Create a new doc in `/docs/ai-knowledge/` when:
 
 ---
 
-## Self-Maintaining Behaviors
+## Mandatory Auto-Triggers
 
-### Command Library
-Reusable agent commands are defined in `docs/ai-commands/README.md`. When a task matches a command trigger, load and follow that command.
+These MUST fire automatically. Do not wait for user to ask:
 
-### Automatic Triggers
-| Trigger | Command | Action |
-|---------|---------|--------|
-| Complex problem solved (3+ files, 5+ exchanges) | document-solution | Create KB doc |
-| Any KB file created/modified | check-kb-index | Update README.md index |
-| User corrects agent error | log-mistake | Append to mistake-log.md |
-| Long session (20+ turns) or pausing work | save-session | Create session handoff doc |
+| Trigger | Action | Why |
+|---------|--------|-----|
+| User says "commit", "stage", "git add" | `pre-commit-check` | Catch violations |
+| KB lookup fails → solved via code | `document-solution` | Update KB |
+| User corrects you | `log-mistake` | Build patterns |
+| Modified KB files | `check-kb-index` | Keep index current |
+| User ending session | `session-end-checklist` | Catch missed automation |
+
+### Trigger Detection Examples
+
+```
+USER: "let's commit these changes"
+→ Detected "commit" → run pre-commit-check BEFORE git operations
+
+USER: "no that's wrong, you need to use gecko-* tokens"
+→ Detected correction phrase → run log-mistake
+
+USER: "thanks, that's all for today"
+→ Detected session end → run session-end-checklist
+```
+
+**Correction phrases** (run `log-mistake` immediately):
+"that's wrong", "actually...", "no, it should be...", "you forgot to...", "you missed..."
+
+Do NOT wait for explicit requests - detect and trigger proactively.
+
+---
+
+## Command Library
+
+Commands: `docs/ai-commands/`
+
+| Command | When |
+|---------|------|
+| `pre-commit-check` | Before commit/staging |
+| `session-end-checklist` | Session ending |
+| `log-mistake` | User corrects you |
+| `document-solution` | Complex problem solved or KB miss |
+| `check-kb-index` | After KB file changes |
+| `save-session` | Long session (20+ turns) |
+
+*Tables are summaries. Source of truth is individual files in `docs/ai-commands/`.*
+
+---
+
+## Self-Documentation Rules
+
+### Update KB when:
+- KB lookup failed but you solved via code search → run `document-solution`
+- Complex solution (3+ files, 5+ exchanges) → run `document-solution`
+- After any KB change → run `check-kb-index`
+
+### Format:
+- Kebab-case filenames
+- Include "Last Updated" date
+- Include "Context" section
 
 ### Mistake Pattern Learning
 When corrected, log the pattern to `docs/ai-knowledge/ai-patterns/mistake-log.md`. If a pattern appears 3+ times, add it to the "Things to Avoid" section above.
@@ -483,3 +545,15 @@ When corrected, log the pattern to `docs/ai-knowledge/ai-patterns/mistake-log.md
 - **gecko_dsp**: Signal processing (EQ, future: compressor, limiter)
 - **gecko_platform**: OS-specific audio routing (PipeWire, WASAPI, CoreAudio)
 - **src-tauri**: Tauri commands, app state, IPC bridge
+
+---
+
+## REMEMBER (End of File)
+
+Before responding, check:
+1. **Am I being corrected?** → Run `log-mistake`
+2. **Is user committing/staging?** → Run `pre-commit-check`
+3. **Is user ending session?** → Run `session-end-checklist`
+4. **Did I solve something complex without KB?** → Run `document-solution`
+
+Detect and execute automatically.

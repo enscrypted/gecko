@@ -48,7 +48,8 @@
       }
     },
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "14.4",
+      "entitlements": "Gecko.entitlements"
     },
     "windows": {
       "webviewInstallMode": {

@@ -31,6 +31,14 @@ interface AudioStreamItemProps {
   volume?: number;
   /** Callback when volume changes */
   onVolumeChange?: (volume: number) => void;
+  /** macOS only: Whether this app's audio can be captured (Process Tap) */
+  showCaptureToggle?: boolean;
+  /** macOS only: Callback when capture toggle is clicked */
+  onCaptureToggle?: (capture: boolean) => void;
+  /** macOS only: Whether this app can be tapped (false for Safari, system apps) */
+  isTappable?: boolean;
+  /** macOS only: Reason why the app cannot be tapped */
+  untappableReason?: string;
 }
 
 const EQ_FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -58,7 +66,13 @@ export function AudioStreamItem({
   onHide,
   volume = 1.0,
   onVolumeChange,
+  showCaptureToggle = false,
+  onCaptureToggle,
+  isTappable = true,
+  untappableReason,
 }: AudioStreamItemProps) {
+  // Untappable apps cannot have per-app EQ or capture - their audio bypasses Gecko entirely
+  const isUntappable = showCaptureToggle && !isTappable;
   const [isExpanded, setIsExpanded] = useState(isMaster);
   const [localGains, setLocalGains] = useState<number[]>(bandGains);
   const [localVolume, setLocalVolume] = useState<number>(volume);
@@ -194,25 +208,40 @@ export function AudioStreamItem({
       style={isMaster ? { '--tw-shadow-color': 'var(--gecko-accent)' } as React.CSSProperties : undefined}
     >
       {/* Header - Always visible */}
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center justify-between p-3 text-left hover:bg-gecko-bg-tertiary/50 rounded-t-lg transition-colors"
-        disabled={disabled}
+      {/* For untappable apps, this is just a display div, not a clickable button */}
+      <div
+        onClick={() => {
+          // Don't expand/collapse for untappable apps since there's no EQ to show
+          if (!isUntappable) {
+            setIsExpanded(!isExpanded);
+          }
+        }}
+        className={cn(
+          "w-full flex items-center justify-between p-3 text-left rounded-t-lg transition-colors",
+          !isUntappable && !disabled && "cursor-pointer hover:bg-gecko-bg-tertiary/50",
+          isUntappable && "cursor-default",
+          disabled && "cursor-not-allowed"
+        )}
       >
         <div className="flex items-center gap-3">
-          {/* Expand/collapse indicator */}
-          <span
-            className={cn(
-              "text-gecko-text-secondary transition-transform duration-200",
-              isExpanded && "rotate-90"
-            )}
-          >
-            ▶
-          </span>
+          {/* Expand/collapse indicator - hidden for untappable apps */}
+          {!isUntappable && (
+            <span
+              className={cn(
+                "text-gecko-text-secondary transition-transform duration-200",
+                isExpanded && "rotate-90"
+              )}
+            >
+              ▶
+            </span>
+          )}
 
           {/* Stream info */}
           <div className="flex flex-col">
-            <span className="font-medium text-gecko-text-primary">
+            <span className={cn(
+              "font-medium",
+              isUntappable ? "text-gecko-text-muted" : "text-gecko-text-primary"
+            )}>
               {isMaster ? "Master (All Apps)" : name}
             </span>
             {!isMaster && (
@@ -223,17 +252,25 @@ export function AudioStreamItem({
 
         {/* Status badges */}
         <div className="flex items-center gap-2">
-          {isBypassed && !isMaster && (
+          {isUntappable && (
+            <span
+              className="text-xs px-2 py-0.5 rounded bg-gecko-text-muted/20 text-gecko-text-muted cursor-help"
+              title={untappableReason || "This app's audio cannot be captured due to macOS security restrictions. Only Master EQ affects this app."}
+            >
+              Protected
+            </span>
+          )}
+          {isBypassed && !isMaster && !isUntappable && (
             <Badge variant="default" className="text-xs bg-gecko-warning/20 text-gecko-warning">
               Bypassed
             </Badge>
           )}
-          {isActive && (
+          {isActive && !isUntappable && (
             <Badge variant="success" className="text-xs">
               Active
             </Badge>
           )}
-          {isRoutedToGecko && (
+          {isRoutedToGecko && !isUntappable && (
             <Badge variant="default" className="text-xs">
               Routed
             </Badge>
@@ -244,68 +281,109 @@ export function AudioStreamItem({
             </Badge>
           )}
         </div>
-      </button>
+      </div>
 
-      {/* Per-app controls (bypass/hide/volume) - shown in header area for non-master streams */}
+      {/* Per-app controls (bypass/hide/volume/capture) - shown in header area for non-master streams */}
       {/* Clicking empty area in this row also toggles expand/collapse */}
       {!isMaster && (
         <div
           className="flex items-center gap-3 px-3 pb-2 shadow-[0_1px_0_0_var(--gecko-border)] transition-colors"
         >
-          {/* Volume slider */}
-          <div
-            className="flex items-center gap-2 flex-1"
-          >
-            <span className="text-xs text-gecko-text-muted">Vol</span>
-            <input
-              type="range"
-              min={0}
-              max={2}
-              step={0.01}
-              value={localVolume}
-              onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
-              className="flex-1 h-1 bg-gecko-bg-tertiary rounded-lg appearance-none cursor-pointer accent-gecko-accent"
-              title={`Volume: ${Math.round(localVolume * 100)}%`}
-            />
-            <EditableValue
-              value={Math.round(localVolume * 100)}
-              onChange={(percent) => handleVolumeChange(percent / 100)}
-              min={0}
-              max={200}
-              decimals={0}
-              suffix="%"
-              className="text-gecko-text-secondary w-10 text-right"
-              inputWidth="w-10"
-            />
-          </div>
-          <button
-            onClick={() => {
-              onBypassChange?.(!isBypassed);
-            }}
-            className={cn(
-              "text-xs px-2 py-1 rounded transition-colors",
-              isBypassed
-                ? "bg-gecko-warning/20 text-gecko-warning hover:bg-gecko-warning/30"
-                : "bg-gecko-bg-tertiary text-gecko-text-secondary hover:bg-gecko-bg-tertiary/80"
-            )}
-            title={isBypassed ? "Enable EQ processing for this app" : "Bypass EQ processing for this app"}
-          >
-            {isBypassed ? "Enable EQ" : "Bypass"}
-          </button>
-          <button
-            onClick={() => {
-              onHide?.();
-            }}
-            className="text-xs px-2 py-1 rounded bg-gecko-bg-tertiary text-gecko-text-secondary hover:bg-gecko-bg-tertiary/80 transition-colors"
-            title="Hide this app from the list (still processed)"
-          >
-            Hide
-          </button>
+          {isUntappable ? (
+            /* Untappable app - show info message instead of controls */
+            <>
+              <span
+                className="flex-1 text-xs text-gecko-text-muted italic"
+                title={untappableReason || "This app cannot be captured due to system restrictions"}
+              >
+                {untappableReason || "Cannot be captured (system restriction)"}
+              </span>
+              <button
+                onClick={() => {
+                  onHide?.();
+                }}
+                className="text-xs px-2 py-1 rounded bg-gecko-bg-tertiary text-gecko-text-secondary hover:bg-gecko-bg-tertiary/80 transition-colors"
+                title="Hide this app from the list"
+              >
+                Hide
+              </button>
+            </>
+          ) : (
+            /* Normal tappable app - show full controls */
+            <>
+              {/* Volume slider */}
+              <div
+                className="flex items-center gap-2 flex-1"
+              >
+                <span className="text-xs text-gecko-text-muted">Vol</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={0.01}
+                  value={localVolume}
+                  onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
+                  className="flex-1 h-1 bg-gecko-bg-tertiary rounded-lg appearance-none cursor-pointer accent-gecko-accent"
+                  title={`Volume: ${Math.round(localVolume * 100)}%`}
+                />
+                <EditableValue
+                  value={Math.round(localVolume * 100)}
+                  onChange={(percent) => handleVolumeChange(percent / 100)}
+                  min={0}
+                  max={200}
+                  decimals={0}
+                  suffix="%"
+                  className="text-gecko-text-secondary w-10 text-right"
+                  inputWidth="w-10"
+                />
+              </div>
+              {/* macOS capture toggle - start/stop Process Tap capture for this app */}
+              {showCaptureToggle && (
+                <button
+                  onClick={() => {
+                    onCaptureToggle?.(!isRoutedToGecko);
+                  }}
+                  className={cn(
+                    "text-xs px-2 py-1 rounded transition-colors",
+                    isRoutedToGecko
+                      ? "bg-gecko-success/20 text-gecko-success hover:bg-gecko-success/30"
+                      : "bg-gecko-bg-tertiary text-gecko-text-secondary hover:bg-gecko-bg-tertiary/80"
+                  )}
+                  title={isRoutedToGecko ? "Stop capturing this app's audio" : "Start capturing this app's audio for EQ"}
+                >
+                  {isRoutedToGecko ? "Capturing" : "Capture"}
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  onBypassChange?.(!isBypassed);
+                }}
+                className={cn(
+                  "text-xs px-2 py-1 rounded transition-colors",
+                  isBypassed
+                    ? "bg-gecko-warning/20 text-gecko-warning hover:bg-gecko-warning/30"
+                    : "bg-gecko-bg-tertiary text-gecko-text-secondary hover:bg-gecko-bg-tertiary/80"
+                )}
+                title={isBypassed ? "Enable EQ processing for this app" : "Bypass EQ processing for this app"}
+              >
+                {isBypassed ? "Enable EQ" : "Bypass"}
+              </button>
+              <button
+                onClick={() => {
+                  onHide?.();
+                }}
+                className="text-xs px-2 py-1 rounded bg-gecko-bg-tertiary text-gecko-text-secondary hover:bg-gecko-bg-tertiary/80 transition-colors"
+                title="Hide this app from the list (still processed)"
+              >
+                Hide
+              </button>
+            </>
+          )}
         </div>
       )}
 
-      {/* Expanded content - EQ sliders */}
-      {isExpanded && (
+      {/* Expanded content - EQ sliders (not shown for untappable apps since their audio can't be processed) */}
+      {isExpanded && !isUntappable && (
         <div className="p-4 pt-3 space-y-3">
           {/* Preset Selector */}
           <PresetSelector

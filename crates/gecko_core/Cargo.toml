@@ -21,6 +21,10 @@ serde_json.workspace = true
 directories = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
 
+# macOS: For process existence checking (kill syscall)
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 criterion.workspace = true
 serde_json.workspace = true
