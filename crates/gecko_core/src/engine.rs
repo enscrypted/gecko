@@ -35,8 +35,8 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 
-// Note: HostTrait is used on non-Linux/non-macOS platforms for device enumeration
-#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+// Note: HostTrait is used on platforms without native backends (not Linux, macOS, or Windows)
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos"), not(target_os = "windows")))]
 use cpal::traits::HostTrait;
 use tracing::{debug, error, info, warn};
 
@@ -57,6 +57,12 @@ use gecko_platform::macos::{
 };
 #[cfg(target_os = "macos")]
 use gecko_platform::PlatformBackend as _; // Import trait to bring methods into scope
+
+// Windows: WASAPI backend with Process Loopback API
+#[cfg(target_os = "windows")]
+use gecko_platform::windows::{AudioProcessingState as WasapiProcessingState, WasapiBackend};
+#[cfg(target_os = "windows")]
+use gecko_platform::PlatformBackend as _;
 
 /// Helper to map PIDs to app names using AppleScript (macOS only)
 /// Returns a HashMap of PID -> app name
@@ -479,6 +485,22 @@ impl AudioEngine {
         let mut macos_state: Option<Arc<AudioProcessingState>> = None;
         #[cfg(target_os = "macos")]
         let mut _macos_output: Option<AudioOutputStream> = None;
+
+        // Windows: Store WASAPI backend for command forwarding
+        #[cfg(target_os = "windows")]
+        let mut windows_backend: Option<WasapiBackend> = None;
+        // Windows: Store processing state for peaks/spectrum
+        #[cfg(target_os = "windows")]
+        let mut windows_state: Option<Arc<WasapiProcessingState>> = None;
+        // Windows: Timer for periodic app scanning (every 2 seconds)
+        #[cfg(target_os = "windows")]
+        let mut last_app_scan_windows = std::time::Instant::now();
+        #[cfg(target_os = "windows")]
+        let app_scan_interval_windows = std::time::Duration::from_secs(2);
+        // Windows: Track captured PIDs
+        #[cfg(target_os = "windows")]
+        let mut captured_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
         // macOS: Timer for periodic app scanning (every 2 seconds for new apps)
         #[cfg(target_os = "macos")]
         let mut last_app_scan = std::time::Instant::now();
@@ -874,8 +896,98 @@ impl AudioEngine {
                                 }
                             }
 
-                            // Windows/Other platforms: fall back to output-only mode
-                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+                            // Windows: Use WASAPI backend with Process Loopback API
+                            #[cfg(target_os = "windows")]
+                            {
+                                info!("Initializing WASAPI backend for Windows audio routing");
+
+                                match WasapiBackend::new() {
+                                    Ok(mut backend) => {
+                                        info!(
+                                            "WASAPI backend initialized: {} (Per-app capture: {})",
+                                            backend.name(),
+                                            backend.supports_process_loopback()
+                                        );
+
+                                        // Get processing state for peaks/spectrum
+                                        let state = backend.processing_state().cloned();
+
+                                        // Set initial volume and bypass
+                                        backend.set_master_volume(master_volume);
+                                        backend.set_master_bypass(bypassed);
+
+                                        // Apply stored Master EQ gains
+                                        let mut eq_gains = [0.0f32; 10];
+                                        for (band, &gain_db) in master_eq_gains.iter().enumerate() {
+                                            eq_gains[band] = gain_db;
+                                        }
+                                        backend.set_master_eq_gains(eq_gains);
+
+                                        // Start audio output
+                                        match backend.start_output() {
+                                            Ok(()) => {
+                                                info!("WASAPI audio output started");
+
+                                                // Enumerate and auto-capture apps with active audio
+                                                match backend.list_audio_apps() {
+                                                    Ok(apps) => {
+                                                        info!("Found {} apps with audio sessions", apps.len());
+                                                        for app in &apps {
+                                                            if app.is_active {
+                                                                debug!("  - {} (PID {}, active)", app.name, app.pid);
+                                                                // Try to capture this app
+                                                                match backend.start_capture(&app.name, app.pid) {
+                                                                    Ok(()) => {
+                                                                        captured_pids.insert(app.pid);
+                                                                        info!("✓ Capturing: {} (PID {})", app.name, app.pid);
+                                                                        let _ = event_sender.send(Event::StreamDiscovered {
+                                                                            app_name: app.name.clone(),
+                                                                            node_id: app.pid,
+                                                                        });
+                                                                    }
+                                                                    Err(e) => {
+                                                                        debug!("✗ Could not capture {}: {}", app.name, e);
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                debug!("  - {} (PID {}, inactive)", app.name, app.pid);
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("Failed to enumerate audio apps: {}", e);
+                                                    }
+                                                }
+
+                                                // Store backend and state
+                                                windows_state = state;
+                                                windows_backend = Some(backend);
+
+                                                is_running.store(true, Ordering::SeqCst);
+                                                let _ = event_sender.send(Event::Started);
+                                                info!("WASAPI backend active - engine started");
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to start audio output: {}", e);
+                                                let _ = event_sender.send(Event::error(format!(
+                                                    "Failed to start audio output: {}",
+                                                    e
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to initialize WASAPI backend: {}", e);
+                                        let _ = event_sender.send(Event::error(format!(
+                                            "WASAPI not available: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            }
+
+                            // Other platforms (not Linux, macOS, or Windows): fall back to output-only mode
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos"), not(target_os = "windows")))]
                             {
                                 let host = cpal::default_host();
                                 let output_device = match host.default_output_device() {
@@ -976,8 +1088,25 @@ impl AudioEngine {
                                 macos_backend = None;
                             }
 
-                            // Windows/Other: Stop audio stream
-                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+                            // Windows: Stop WASAPI backend
+                            #[cfg(target_os = "windows")]
+                            {
+                                if let Some(ref mut backend) = windows_backend {
+                                    // Stop all captures
+                                    for pid in captured_pids.drain() {
+                                        let _ = backend.stop_capture(pid);
+                                    }
+                                    // Stop output
+                                    if let Err(e) = backend.stop_output() {
+                                        warn!("Failed to stop output: {}", e);
+                                    }
+                                }
+                                windows_backend = None;
+                                windows_state = None;
+                            }
+
+                            // Other platforms: Stop audio stream
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos"), not(target_os = "windows")))]
                             if stream.is_none() {
                                 debug!("Engine not running");
                                 continue;
@@ -1009,8 +1138,14 @@ impl AudioEngine {
                                 }
                             }
 
-                            // Windows/Other: Forward to audio stream
-                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+                            // Windows: Forward to WASAPI backend
+                            #[cfg(target_os = "windows")]
+                            if let Some(ref backend) = windows_backend {
+                                backend.set_master_volume(master_volume);
+                            }
+
+                            // Other platforms: Forward to audio stream
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos"), not(target_os = "windows")))]
                             if let Some(ref s) = stream {
                                 s.set_master_volume(master_volume);
                             }
@@ -1036,8 +1171,14 @@ impl AudioEngine {
                                 }
                             }
 
-                            // Windows/Other: Forward to audio stream
-                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+                            // Windows: Forward to WASAPI backend
+                            #[cfg(target_os = "windows")]
+                            if let Some(ref backend) = windows_backend {
+                                backend.set_master_bypass(bypassed);
+                            }
+
+                            // Other platforms: Forward to audio stream
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos"), not(target_os = "windows")))]
                             if let Some(ref s) = stream {
                                 s.set_bypass(bypassed);
                             }
@@ -1084,6 +1225,17 @@ impl AudioEngine {
                                 if let Some(ref state) = macos_state {
                                     state.set_eq_band(band, gain_db);
                                 }
+                            }
+
+                            // Windows: Forward to WASAPI backend EQ
+                            #[cfg(target_os = "windows")]
+                            if let Some(ref backend) = windows_backend {
+                                // Update the full gains array
+                                let mut eq_gains = [0.0f32; 10];
+                                for (i, &g) in master_eq_gains.iter().enumerate() {
+                                    eq_gains[i] = g;
+                                }
+                                backend.set_master_eq_gains(eq_gains);
                             }
                         }
 
@@ -1305,7 +1457,9 @@ impl AudioEngine {
                             let running = linux_backend.is_some();
                             #[cfg(target_os = "macos")]
                             let running = macos_backend.is_some();
-                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+                            #[cfg(target_os = "windows")]
+                            let running = windows_backend.is_some();
+                            #[cfg(all(not(target_os = "linux"), not(target_os = "macos"), not(target_os = "windows")))]
                             let running = stream.is_some();
 
                             let state = Event::StateUpdate {
@@ -1468,8 +1622,52 @@ impl AudioEngine {
                         }
                     }
 
-                    // Windows/Other: Get peaks from audio stream
-                    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+                    // Windows: Get peaks from WASAPI processing state
+                    #[cfg(target_os = "windows")]
+                    if let Some(ref state) = windows_state {
+                        let peaks = state.get_peak_levels();
+                        let l = peaks[0];
+                        let r = peaks[1];
+                        // Only send if there's actual audio
+                        if l > 0.001 || r > 0.001 {
+                            let _ = event_sender.try_send(Event::LevelUpdate { left: l, right: r });
+                        }
+                    }
+
+                    // Windows: Periodic app scanning (every 2 seconds)
+                    #[cfg(target_os = "windows")]
+                    if is_running.load(Ordering::Relaxed) && windows_backend.is_some() {
+                        if last_app_scan_windows.elapsed() >= app_scan_interval_windows {
+                            last_app_scan_windows = std::time::Instant::now();
+
+                            if let Some(ref mut backend) = windows_backend {
+                                // Get currently active audio apps
+                                if let Ok(apps) = backend.list_audio_apps() {
+                                    for app in apps {
+                                        if app.is_active && !captured_pids.contains(&app.pid) {
+                                            // Try to capture new active app
+                                            match backend.start_capture(&app.name, app.pid) {
+                                                Ok(()) => {
+                                                    captured_pids.insert(app.pid);
+                                                    info!("Auto-captured new app: {} (PID {})", app.name, app.pid);
+                                                    let _ = event_sender.send(Event::StreamDiscovered {
+                                                        app_name: app.name.clone(),
+                                                        node_id: app.pid,
+                                                    });
+                                                }
+                                                Err(e) => {
+                                                    debug!("Could not capture {}: {}", app.name, e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Other platforms: Get peaks from audio stream
+                    #[cfg(all(not(target_os = "linux"), not(target_os = "macos"), not(target_os = "windows")))]
                     if let Some(ref s) = stream {
                         let (l, r) = s.get_peaks();
                         // Only send if there's actual audio

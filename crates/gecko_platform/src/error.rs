@@ -48,6 +48,14 @@ pub enum PlatformError {
     SerializationError(String),
 }
 
+/// Convert Windows API errors to PlatformError
+#[cfg(target_os = "windows")]
+impl From<windows::core::Error> for PlatformError {
+    fn from(err: windows::core::Error) -> Self {
+        PlatformError::Internal(format!("Windows API error: {}", err))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

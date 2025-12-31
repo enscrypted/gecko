@@ -50,10 +50,24 @@ version = "0.8"
 [workspace.dependencies.windows]
 version = "0.58"
 features = [
-    "Win32_Media_Audio",
-    "Win32_System_Com",
-    "Win32_System_Threading",
+    # Core
     "Win32_Foundation",
+    # Audio APIs
+    "Win32_Media_Audio",
+    # COM
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    # Threading
+    "Win32_System_Threading",
+    # Version detection (RtlGetVersion)
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    # Process enumeration
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    # Device properties
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Devices_Properties",
 ]
 
 # Testing
